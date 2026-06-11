@@ -1,5 +1,12 @@
 # Azure and EntraID IAM Scanner
 
+[![CI](https://github.com/zmustafa/AzureEntraIDIAMScanner/actions/workflows/ci.yml/badge.svg)](https://github.com/zmustafa/AzureEntraIDIAMScanner/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/zmustafa/AzureEntraIDIAMScanner/actions/workflows/codeql.yml/badge.svg)](https://github.com/zmustafa/AzureEntraIDIAMScanner/actions/workflows/codeql.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PowerShell 5.1+](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)](https://learn.microsoft.com/powershell/)
+[![Node.js 18+](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Read-only](https://img.shields.io/badge/access-read--only-success)](SECURITY.md)
+
 `all-azure-access` is the package and scanner command identity for Azure and EntraID IAM Scanner, a console-runnable Azure and Microsoft Entra access discovery scanner. It is designed to inventory broad access across Azure control plane, Azure data plane role assignments, Entra directory roles, group-derived access, service principal ownership, Key Vault access policies, and optional/best-effort access surfaces such as PIM, billing, reservations, and classic subscription administrators.
 
 The scanner is intentionally resilient: each access area is collected independently, failures are recorded in the output, and the run continues wherever possible.

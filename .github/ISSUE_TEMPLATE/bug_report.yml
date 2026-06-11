@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a problem with the Azure and EntraID IAM Scanner.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Do not paste real scan output, tenant IDs, subscription IDs, principal names, or any organization-specific access data.** Redact or use placeholder values.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the problem and what you expected instead.
+      placeholder: When I run ./run.ps1 with ... I expected ... but got ...
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) you ran (redact sensitive values).
+      placeholder: |
+        1. powershell -ExecutionPolicy Bypass -File .\run.ps1 -LimitResources 25 -ContinueOnError
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output or error (redacted)
+      description: Paste the collector status, error message, or stack trace. Remove any sensitive values.
+      render: text
+  - type: input
+    id: scanner-version
+    attributes:
+      label: Scanner version
+      description: From package.json or the GitHub release tag.
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: powershell
+    attributes:
+      label: PowerShell edition
+      options:
+        - Windows PowerShell 5.1
+        - PowerShell 7.x
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: az-version
+    attributes:
+      label: Azure CLI version
+      description: Output of `az version` (azure-cli field).
+      placeholder: 2.85.0
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js version
+      placeholder: 20.x
