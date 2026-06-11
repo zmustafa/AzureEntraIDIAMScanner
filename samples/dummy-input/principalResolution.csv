@@ -1,0 +1,7 @@
+"principalId","principalType","displayName","userPrincipalName","appId","accountEnabled","source"
+"user-0001","User","Alex Admin","alex.admin@example.invalid","","true","Dummy"
+"user-0002","User","Riley Operator","riley.operator@example.invalid","","true","Dummy"
+"user-0003","User","Morgan Storage","morgan.storage@example.invalid","","true","Dummy"
+"group-0001","Group","Platform Operators","","","","Dummy"
+"group-0002","Group","Finance File Share Users","","","","Dummy"
+"spn-0001","ServicePrincipal","Example Automation SPN","","app-0001","true","Dummy"

@@ -1,0 +1,22 @@
+{
+  "generatedUtc": "2026-01-10T00:00:12Z",
+  "runDir": "samples/dummy-input",
+  "subscriptionsDiscovered": 3,
+  "managementGroupsDiscovered": 1,
+  "resourceGroupsDiscovered": 4,
+  "resourcesDiscovered": 6,
+  "scopesDiscovered": 8,
+  "roleDefinitionsDiscovered": 6,
+  "directAssignments": 10,
+  "effectiveAssignments": 13,
+  "groupDerivedAssignments": 2,
+  "servicePrincipalOwnerRows": 1,
+  "collectorFailures": 1,
+  "skippedCollectors": 1,
+  "options": {
+    "dummyData": true,
+    "skipReservations": false,
+    "fullRoleDefinitionScan": true,
+    "note": "Synthetic sample only. No real tenant data."
+  }
+}

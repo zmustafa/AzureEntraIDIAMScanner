@@ -1,0 +1,31 @@
+{
+  "name": "all-azure-access",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Azure and EntraID IAM Scanner for standalone access discovery with CSV, JSON, and XLSX reporting.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zmustafa/AzureEntraIDIAMScanner.git"
+  },
+  "bugs": {
+    "url": "https://github.com/zmustafa/AzureEntraIDIAMScanner/issues"
+  },
+  "homepage": "https://github.com/zmustafa/AzureEntraIDIAMScanner#readme",
+  "scripts": {
+    "audit": "npm audit",
+    "scan": "powershell -ExecutionPolicy Bypass -File ./run.ps1 -ContinueOnError",
+    "sample": "node ./samples/build-dummy-sample.mjs",
+    "scan:quick": "powershell -ExecutionPolicy Bypass -File ./run.ps1 -LimitResources 25 -SkipReservations -ContinueOnError",
+    "validate": "powershell -ExecutionPolicy Bypass -File ./Test-Package.ps1"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

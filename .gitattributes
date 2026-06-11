@@ -1,0 +1,18 @@
+# Normalize line endings on commit; check out platform-appropriate endings.
+* text=auto
+
+# PowerShell scripts and modules are Windows-first; keep CRLF.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+
+# Keep LF for cross-platform text formats.
+*.mjs text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.csv text eol=lf
+
+# Treat generated/binary report artifacts as binary.
+*.xlsx binary
+*.zip binary

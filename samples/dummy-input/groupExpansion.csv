@@ -1,0 +1,3 @@
+"sourceGroupId","sourceGroupName","memberId","memberType","memberDisplayName","memberUserPrincipalName","memberAppId","accessPath"
+"group-0001","Platform Operators","user-0002","User","Riley Operator","riley.operator@example.invalid","","GroupTransitive"
+"group-0002","Finance File Share Users","user-0004","User","Finley Finance","finley.finance@example.invalid","","GroupTransitive"

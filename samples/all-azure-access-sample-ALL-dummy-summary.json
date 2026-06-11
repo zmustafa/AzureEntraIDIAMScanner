@@ -1,0 +1,37 @@
+{
+  "generatedUtc": "2026-06-11T16:13:38.743Z",
+  "runDir": "./samples/dummy-input",
+  "workbook": "./samples/all-azure-access-sample-ALL-dummy.xlsx",
+  "allAccessRows": 13,
+  "effectiveAccessRows": 13,
+  "directAssignmentRows": 10,
+  "groupDerivedRows": 2,
+  "servicePrincipalOwnerRows": 1,
+  "uniqueEffectivePrincipals": 13,
+  "uniqueRoles": 12,
+  "uniqueSubscriptions": 3,
+  "collectorCount": 7,
+  "collectorsNeedingAttention": 1,
+  "coverage": {
+    "generatedUtc": "2026-01-10T00:00:12Z",
+    "runDir": "samples/dummy-input",
+    "subscriptionsDiscovered": 3,
+    "managementGroupsDiscovered": 1,
+    "resourceGroupsDiscovered": 4,
+    "resourcesDiscovered": 6,
+    "scopesDiscovered": 8,
+    "roleDefinitionsDiscovered": 6,
+    "directAssignments": 10,
+    "effectiveAssignments": 13,
+    "groupDerivedAssignments": 2,
+    "servicePrincipalOwnerRows": 1,
+    "collectorFailures": 1,
+    "skippedCollectors": 1,
+    "options": {
+      "dummyData": true,
+      "skipReservations": false,
+      "fullRoleDefinitionScan": true,
+      "note": "Synthetic sample only. No real tenant data."
+    }
+  }
+}

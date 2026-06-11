@@ -1,0 +1,7 @@
+"roleName","roleDefinitionId","roleDefinitionGuid","roleType","roleCategory","roleIsPrivileged","roleHasDataActions","actionsCount","dataActionsCount","description","assignableScopes","permissions","collector"
+"Owner","role-owner","role-owner","BuiltInRole","ControlPlane","True","False","1200","0","Dummy owner role","[/]","actions=*","AzureRoleDefinitions"
+"Contributor","role-contributor","role-contributor","BuiltInRole","ControlPlane","True","False","900","0","Dummy contributor role","[/]","actions=* notActions=authorization","AzureRoleDefinitions"
+"Storage Blob Data Reader","role-storage-blob-reader","role-storage-blob-reader","BuiltInRole","DataPlane","False","True","4","2","Dummy blob data reader","[/]","dataActions=blob/read","AzureRoleDefinitions"
+"Storage File Data SMB Share Contributor","role-storage-file-contributor","role-storage-file-contributor","BuiltInRole","DataPlane","False","True","4","4","Dummy file share data contributor","[/]","dataActions=file/read|write","AzureRoleDefinitions"
+"Global Administrator","entra-role-global-admin","entra-role-global-admin","EntraRole","ControlPlane","True","False","","","Dummy Entra role","tenant","directory/admin","EntraRoleAssignments"
+"Privileged Role Administrator","entra-role-pra","entra-role-pra","EntraRole","ControlPlane","True","False","","","Dummy PIM eligible role","tenant","directory/roleManagement","PimDirectoryAssignments"
