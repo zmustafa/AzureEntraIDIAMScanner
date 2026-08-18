@@ -254,13 +254,25 @@ Default run should be broad but practical:
 -IncludeClassicAdmins
 -SkipClassicAdmins
 -IncludeKeyVaultAccessPolicies
+-SkipKeyVaultAccessPolicies
 -NoGroupExpansion
 -MaxGroupDepth 10
+-MaxGroupMembers 0
 -Parallel 8
 -LimitResources 0
+-DeepScopeScan
+-IncludeOtherTenants
+-EmitJson
+-NoHttp
+-LogLevel Debug
+-RedactLogs
+-SupportBundle
+-Quiet / -NoColor / -NoProgress
 -ContinueOnError
 -FailFast
 ```
+
+`-Include*` forces a collector on, `-Skip*` forces it off, and `-Include*` wins if both are supplied.
 
 Default behavior implies `-ContinueOnError`.
 

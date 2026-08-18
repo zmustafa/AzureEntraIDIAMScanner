@@ -18,17 +18,26 @@ The scanner is intentionally resilient: each access area is collected independen
 - Real scan outputs can contain sensitive access data, including privileged users, groups, service principals, ownership relationships, subscriptions, resources, and role assignments.
 - Do not commit real scan outputs to a public repository.
 - Real scan outputs are written outside the repository by default under the OS temp folder, for example `%TEMP%\azure-scanners\all-azure-access\<timestamp>\` on Windows.
+- Bearer tokens and other secret-shaped values are never written to the logs. A support bundle contains no access or role-assignment rows unless you explicitly pass `-IncludeData`. See [Diagnostics And Support](#diagnostics-and-support).
 
 ## Support Policy
 
-This v1 package is Windows-first and is tested with Windows PowerShell. PowerShell 7 may work for many paths, but cross-platform Linux/macOS support is not the current compatibility target.
+This v1 package is Windows-first. It is tested on both Windows PowerShell 5.1 and PowerShell 7. Cross-platform Linux/macOS support is not the current compatibility target.
 
 ## Primary Command
 
-From this standalone folder:
+Clone the repository and install the Node dependency used for workbook generation:
 
 ```powershell
+git clone https://github.com/zmustafa/AzureEntraIDIAMScanner.git
+cd AzureEntraIDIAMScanner
 npm install
+```
+
+Sign in with Azure CLI, then run the scanner:
+
+```powershell
+az login
 powershell -ExecutionPolicy Bypass -File .\run.ps1 -ContinueOnError
 ```
 
@@ -152,11 +161,15 @@ This lets the report answer both questions:
 - Who was directly assigned?
 - Who effectively receives access through group membership?
 
-Use this flag to skip group expansion:
+Every assignment is multiplied by every member, so one very large group can dominate the output. Use these flags to bound or skip expansion:
 
 ```powershell
 -NoGroupExpansion
+-MaxGroupDepth <1-10>
+-MaxGroupMembers <int>
 ```
+
+`-MaxGroupDepth` defaults to `10`, meaning no limit, which Graph answers in a single `transitiveMembers` call per group. A lower value walks direct members level by level instead. `-MaxGroupMembers` stops expanding a group after the given number of members and records the truncation in `errorsWarnings.csv`.
 
 ### Service Principal and Application Ownership
 
@@ -233,7 +246,6 @@ The scanner is built around independent collectors. If one collector fails, the 
 Collector statuses include:
 
 - `Succeeded`
-- `SucceededWithWarnings`
 - `Skipped`
 - `Failed`
 - `Unauthorized`
@@ -251,9 +263,16 @@ Errors and warnings are written to:
 ```text
 output\collectorStatus.csv
 output\errorsWarnings.csv
+output\coverageSummary.json
 errors\<collector>.json
+logs\events.jsonl
+logs\errorSummary.json
 logs\all-azure-access.log
 ```
+
+`collectorStatus.csv`, `errorsWarnings.csv`, `coverageSummary.json`, and `counts.json` are written even when the run is interrupted with Ctrl+C or fails partway through. The event log is flushed as it is written, so it stays readable even if the process is killed outright.
+
+Repeated failures are collapsed: a failure affecting 50,000 scopes produces five examples plus a count in `logs\errorSummary.json`, not 50,000 log lines.
 
 ## Output Location
 
@@ -272,13 +291,15 @@ errors\
 cache\
 raw\
 reports\
+support-bundle-<timestamp>.zip
 ```
+
+`support-bundle-<timestamp>.zip` is present when the run was started with `-SupportBundle`, or whenever the run did not succeed.
 
 ## Main Output Files
 
 ```text
 output\allAzureAccess.csv
-output\allAzureAccess.json
 output\effectiveAccess.csv
 output\directAssignments.csv
 output\groupDerivedAccess.csv
@@ -290,11 +311,26 @@ output\roleDefinitions.csv
 output\scopeInventory.csv
 output\collectorStatus.csv
 output\coverageSummary.json
+output\counts.json
 output\errorsWarnings.csv
 output\results.json
 output\results.zip
 reports\all-azure-access-report-<timestamp>.xlsx
 reports\all-azure-access-summary-<timestamp>.json
+```
+
+`output\allAzureAccess.json` is written only when `-EmitJson` is supplied. It contains the same data as `allAzureAccess.csv`, and serialising it is slow and memory-hungry in large tenants.
+
+Diagnostic files are written under `logs\`:
+
+```text
+logs\events.jsonl
+logs\errorSummary.json
+logs\apiTiming.csv
+logs\apiSummary.json
+logs\environment.json
+logs\parameters.json
+logs\all-azure-access.log
 ```
 
 ## Workbook Sheets
@@ -404,6 +440,8 @@ errorMessage
 
 ## Useful Flags
 
+For collectors that have both, `-Include*` forces the collector on, `-Skip*` forces it off, and `-Include*` wins if both are supplied. Every collector listed below is on by default.
+
 ```powershell
 -SubscriptionIds <string[]>
 ```
@@ -470,6 +508,41 @@ Do not expand group assignments into effective transitive user/service principal
 Collect role definitions from every visible subscription and management group. Without this flag, the scanner collects role definitions from a responsive subscription and infers metadata from observed assignments to keep console runs fast.
 
 ```powershell
+-IncludeOtherTenants
+```
+Also scan subscriptions homed in a tenant other than the signed-in one. These are skipped by default because token acquisition fails for them (`AADSTS50020`); skipped subscriptions are listed in `errorsWarnings.csv`.
+
+```powershell
+-DeepScopeScan
+```
+Query every resource group, resource, and storage child scope individually instead of relying on the subscription-wide enumeration that already returns assignments at all nested scopes. This is exhaustive but issues one Azure CLI call per scope, so it is very slow in large tenants.
+
+```powershell
+-Parallel <int>
+```
+Number of Azure CLI processes to run concurrently for per-subscription work (subscription RBAC, scope inventory, Key Vault policies, classic admins, storage child scopes). Defaults to `1`. Values of `4` to `8` are a good starting point; going wider risks ARM throttling, which costs more time than it saves.
+
+```powershell
+-MaxGroupDepth <1-10>
+```
+How many levels of nested group membership to expand. The default `10` means "no limit" and is answered by a single Graph `transitiveMembers` call per group. Any lower value walks direct members level by level, which is slower but bounds the expansion.
+
+```powershell
+-MaxGroupMembers <int>
+```
+Stop expanding a group after this many members (`0` = unlimited). Because every assignment is multiplied by every member, one very large group can dominate the entire output. Truncated groups are recorded in `errorsWarnings.csv`.
+
+```powershell
+-EmitJson
+```
+Also write `allAzureAccess.json`. Off by default because serialising every row is slow and memory-hungry in large tenants; the CSVs contain the same data.
+
+```powershell
+-NoHttp
+```
+Disable direct HTTPS calls and route every Graph/ARM request through `az rest` instead. Much slower; use only if the in-process HTTP path is blocked by your environment.
+
+```powershell
 -ContinueOnError
 ```
 Continue on collector failures. This is the expected operating mode for broad tenant discovery.
@@ -483,6 +556,60 @@ Stop on the first non-optional collector failure.
 -OutputRoot <path>
 ```
 Write run outputs beneath a custom root. If omitted, the scanner uses `AZURE_IAM_SCANNER_OUTPUT_ROOT` when set, otherwise the OS temp folder plus `azure-scanners`.
+
+### Console output
+
+```powershell
+-Quiet
+-NoColor
+-NoProgress
+```
+Suppress the progress display, colour, or the progress bar. Colour and progress are disabled automatically when output is redirected or when `CI`, `TF_BUILD`, or `GITHUB_ACTIONS` is set, and `NO_COLOR` is honoured. The machine-readable `RUN_DIR=`, `ALL_ACCESS_CSV=`, `FINAL_STATUS=` lines are never coloured or suppressed.
+
+The completion estimate is weighted by measured collector cost rather than by collector count, and each run writes timings to `<OutputRoot>\.calibration\all-azure-access.json`. From the second run against the same environment onward, the percentage and ETA are based on your own measured timings.
+
+### Diagnostics
+
+```powershell
+-LogLevel Error|Warn|Info|Debug|Trace
+```
+Defaults to `Info`. `Debug` records every Azure CLI and HTTP call with its duration, exit code, and response size.
+
+```powershell
+-RedactLogs
+```
+Replace user principal names, GUIDs, and resource names in the logs with stable pseudonyms (`user-xxxxxxxx@redacted`, `id-xxxxxxxx`, `name-xxxxxxxx`). Identical values always map to identical pseudonyms, so redacted logs remain correlatable. The reversal map is written to `logs\redaction-map.LOCAL-ONLY.json` and is never included in a support bundle.
+
+Bearer tokens, JWTs, and secret-shaped values are always stripped, regardless of this switch.
+
+```powershell
+-SupportBundle
+-IncludeData
+```
+Produce `support-bundle-<runid>.zip` in the run directory. A bundle is created automatically whenever the run does not succeed. It contains the event log, error summary, API timings, environment details, the exact parameters used, collector status, and row counts. It contains **no** access or role-assignment rows unless `-IncludeData` is specified.
+
+```powershell
+-NoTranscript
+-MaxLogMegabytes <int>
+```
+Skip the PowerShell transcript, or change the event-log size cap (default 50 MB).
+
+## Diagnostics And Support
+
+Every run writes the following under `logs\`:
+
+| File | Contents |
+| --- | --- |
+| `events.jsonl` | One JSON object per line. Repeated failures are collapsed to five examples plus a count, so a failure affecting 50,000 scopes produces a handful of lines rather than 50,000. |
+| `errorSummary.json` | Every distinct failure class with counts, first/last occurrence, and examples. |
+| `apiTiming.csv` | Per-call timing for every Azure CLI and HTTP request. |
+| `apiSummary.json` | Call counts and durations per API, plus the 50 slowest calls. |
+| `environment.json` | OS, PowerShell, Azure CLI (and extensions), and Node versions. |
+| `parameters.json` | The exact parameters the run was started with. |
+
+`collectorStatus.csv`, `errorsWarnings.csv`, `coverageSummary.json`, and `counts.json` are written even if the run is interrupted with Ctrl+C or fails partway through.
+
+To report a problem, re-run with `-LogLevel Debug -RedactLogs -SupportBundle` and send the resulting `support-bundle-<runid>.zip`.
 
 ## Recommended Run Modes
 
@@ -510,9 +637,22 @@ Deep run with full role definition coverage:
 powershell -ExecutionPolicy Bypass -File .\run.ps1 -FullRoleDefinitionScan -ContinueOnError
 ```
 
+Large tenant:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1 -Parallel 8 -MaxGroupMembers 5000 -SkipReservations -SkipBilling -ContinueOnError
+```
+
+Reproducing a problem for support:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1 -LogLevel Debug -RedactLogs -SupportBundle -ContinueOnError
+```
+
 ## Requirements
 
-- Windows PowerShell 5.1 or later; Windows is the supported v1 operating system
+- Windows PowerShell 5.1 or PowerShell 7; Windows is the supported v1 operating system
+- Git, to clone the repository
 - Azure CLI available as `az`
 - Valid `az login`
 - Sufficient Azure RBAC permissions to list assignments and resources
@@ -522,13 +662,15 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1 -FullRoleDefinitionScan -Cont
 
 ## Validate The Package
 
-Run the built-in package validation from the repository root:
+Clone the repository and run the built-in package validation from the repository root:
 
 ```powershell
+git clone https://github.com/zmustafa/AzureEntraIDIAMScanner.git
+cd AzureEntraIDIAMScanner
 npm run validate
 ```
 
-The validation script parses PowerShell files, installs npm dependencies when needed, regenerates the dummy sample workbook, and verifies the sample summary contains rows.
+The validation script parses every PowerShell file, verifies that no tokens, user principal names, GUIDs, or resource names can leak into a shareable log file, installs npm dependencies when needed, regenerates the dummy sample workbook, and verifies the sample summary contains rows. It needs no Azure connection.
 
 ## Sample Workbook With Dummy Data
 
@@ -549,6 +691,10 @@ The sample uses fake IDs, fake subscriptions, and `example.invalid` identities. 
 To regenerate the sample workbook from the dummy inputs:
 
 ```powershell
+git clone https://github.com/zmustafa/AzureEntraIDIAMScanner.git
+cd AzureEntraIDIAMScanner
+npm install
+
 node .\report.mjs `
   --run-dir .\samples\dummy-input `
   --access-csv .\samples\dummy-input\allAzureAccess.csv `
@@ -570,6 +716,9 @@ node .\report.mjs `
 
 - Workload-specific access models such as Exchange RBAC, SharePoint item permissions, Teams membership, Intune RBAC, Azure DevOps permissions, SQL database permissions, and AKS Kubernetes RBAC are not fully implemented in this scanner. They require separate workload APIs and data models.
 - Some billing, reservation, PIM, and management group APIs may return no data or unauthorized responses depending on the signed-in account.
-- Resource-level and child-scope scans can be slow in large tenants. Use `-LimitResources`, `-ResourceTypes`, `-SkipResourceLevel`, or `-SkipChildDataScopes` for targeted validation.
+- Large tenants take time. Use `-Parallel`, and narrow the run with `-LimitResources`, `-ResourceTypes`, `-SkipResourceLevel`, or `-SkipChildDataScopes`. `-DeepScopeScan` is exhaustive but issues one Azure CLI call per scope and is very slow.
+- By default, resource groups and resources are not queried individually, because the subscription-wide enumeration already returns assignments at every nested scope. `-DeepScopeScan` restores per-scope queries if you need to verify this.
 - Effective access is expanded for groups where Graph transitive membership is available. If Graph denies membership reads, direct assignment rows still remain in the report and the collector status records the issue.
+- Excel caps a worksheet at 1,048,576 rows. `report.mjs` keeps the first `--max-sheet-rows` rows per sheet (250,000 by default) and records any truncation in the report summary; the CSV outputs are always complete.
+- Subscriptions homed in another tenant are skipped by default, because a token cannot be acquired for them. Use `-IncludeOtherTenants` to attempt them anyway.
 - v1 is Windows-first. Cross-platform PowerShell support may require additional testing and small process-launch changes.

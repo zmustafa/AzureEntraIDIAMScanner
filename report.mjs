@@ -72,6 +72,83 @@ function readCsv(filePath) {
   return parseCsv(fs.readFileSync(filePath, "utf8"));
 }
 
+// Excel caps a sheet at 1,048,576 rows, and readFileSync on a multi-GB CSV blows V8's
+// string limit long before that. Read in chunks and stop at maxRows.
+function readCsvBounded(filePath, maxRows) {
+  const result = { rows: [], truncated: false, bytes: 0 };
+  if (!filePath || !fs.existsSync(filePath)) return result;
+  result.bytes = fs.statSync(filePath).size;
+
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(1 << 22);
+    const decoder = new TextDecoder("utf-8");
+    let headers = null;
+    let row = [];
+    let field = "";
+    let inQuotes = false;
+    let quoteSeen = false;
+    let done = false;
+
+    const pushRow = () => {
+      row.push(field);
+      field = "";
+      if (headers === null) {
+        headers = row.map((h) => h.trim());
+      } else if (row.some((v) => String(v || "").trim() !== "")) {
+        const item = {};
+        headers.forEach((header, index) => {
+          item[header] = row[index] ?? "";
+        });
+        result.rows.push(item);
+        if (result.rows.length >= maxRows) {
+          result.truncated = true;
+          done = true;
+        }
+      }
+      row = [];
+    };
+
+    const feed = (text) => {
+      for (let i = 0; i < text.length && !done; i += 1) {
+        const ch = text[i];
+        if (quoteSeen) {
+          quoteSeen = false;
+          if (ch === '"') {
+            field += '"';
+            continue;
+          }
+          inQuotes = false;
+        }
+        if (inQuotes) {
+          if (ch === '"') quoteSeen = true;
+          else field += ch;
+          continue;
+        }
+        if (ch === '"') inQuotes = true;
+        else if (ch === ",") {
+          row.push(field);
+          field = "";
+        } else if (ch === "\n") pushRow();
+        else if (ch !== "\r") field += ch;
+      }
+    };
+
+    while (!done) {
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (read <= 0) break;
+      feed(decoder.decode(buffer.subarray(0, read), { stream: true }));
+    }
+    if (!done) {
+      feed(decoder.decode());
+      if (field.length > 0 || row.length > 0) pushRow();
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return result;
+}
+
 function readJson(filePath, fallback) {
   if (!filePath || !fs.existsSync(filePath)) return fallback;
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -159,16 +236,27 @@ async function main() {
   if (!options.output) throw new Error("--output is required");
   if (!options.summaryJson) throw new Error("--summary-json is required");
 
-  const accessRows = readCsv(options.accessCsv);
-  const effectiveRows = readCsv(options.effectiveCsv);
-  const directRows = readCsv(options.directCsv);
-  const groupRows = readCsv(options.groupCsv);
-  const ownerRows = readCsv(options.servicePrincipalOwnersCsv);
-  const statusRows = readCsv(options.collectorStatusCsv);
-  const scopeRows = readCsv(options.scopeInventoryCsv);
-  const roleRows = readCsv(options.roleDefinitionsCsv);
-  const principalRows = readCsv(options.principalResolutionCsv);
-  const errorsRows = readCsv(options.errorsCsv);
+  const maxSheetRows = Math.max(1000, Number(options.maxSheetRows) || 250000);
+  const truncatedSheets = [];
+  const load = (filePath, label) => {
+    const result = readCsvBounded(filePath, maxSheetRows);
+    if (result.truncated) {
+      truncatedSheets.push({ sheet: label, keptRows: result.rows.length, sourceBytes: result.bytes });
+      console.warn(`[warn] ${label}: kept first ${result.rows.length} rows (--max-sheet-rows); source file is ${result.bytes} bytes.`);
+    }
+    return result.rows;
+  };
+
+  const accessRows = load(options.accessCsv, "All access");
+  const effectiveRows = load(options.effectiveCsv, "Effective access");
+  const directRows = load(options.directCsv, "Direct assignments");
+  const groupRows = load(options.groupCsv, "Group derived");
+  const ownerRows = load(options.servicePrincipalOwnersCsv, "SP owners");
+  const statusRows = load(options.collectorStatusCsv, "Collector status");
+  const scopeRows = load(options.scopeInventoryCsv, "Scope inventory");
+  const roleRows = load(options.roleDefinitionsCsv, "Role definitions");
+  const principalRows = load(options.principalResolutionCsv, "Principal resolution");
+  const errorsRows = load(options.errorsCsv, "Errors and warnings");
   const coverage = readJson(options.coverageJson, {});
 
   fs.mkdirSync(path.dirname(options.output), { recursive: true });
@@ -305,6 +393,8 @@ async function main() {
     generatedUtc: new Date().toISOString(),
     runDir: options.runDir || "",
     workbook: options.output,
+    maxSheetRows,
+    truncatedSheets,
     allAccessRows: accessRows.length,
     effectiveAccessRows: effectiveRows.length,
     directAssignmentRows: directRows.length,

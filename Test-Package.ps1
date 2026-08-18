@@ -23,6 +23,33 @@ function Test-PowerShellParse {
 Test-PowerShellParse -Path (Join-Path $root 'run.ps1')
 Test-PowerShellParse -Path (Join-Path $root 'Run-QuickScan.ps1')
 Test-PowerShellParse -Path (Join-Path $root 'lib\AzureScannerCommon.psm1')
+Test-PowerShellParse -Path (Join-Path $root 'lib\AzureScannerLog.psm1')
+Test-PowerShellParse -Path (Join-Path $root 'lib\AzureScannerUI.psm1')
+
+# Logs get emailed to support, so a token or UPN reaching disk is a release blocker.
+Import-Module (Join-Path $root 'lib\AzureScannerLog.psm1') -Force -WarningAction SilentlyContinue
+$redactionDir = Join-Path ([System.IO.Path]::GetTempPath()) ('azscan-redaction-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+try {
+    Initialize-ScannerLog -LogDirectory $redactionDir -LogLevel 'Trace' -RedactOnDisk -TenantId 'test-tenant' | Out-Null
+    $secret = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+    Write-ScannerEvent -Level 'Error' -Collector 'RedactionTest' -EventName 'leak-probe' `
+        -Message ("Authorization: Bearer $secret for jane.doe@contoso.com with access_token=$secret") `
+        -Scope '/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/rg-secret-name'
+    Write-ScannerEvent -Level 'Warn' -Collector 'RedactionTest' -EventName 'leak-probe-2' -Message "client_secret: hunter2-should-not-appear"
+    Close-ScannerLog | Out-Null
+
+    $forbidden = @('eyJhbGciOiJIUzI1NiJ9', 'jane\.doe@contoso\.com', 'hunter2', 'rg-secret-name', '11111111-2222-3333-4444-555555555555')
+    foreach ($file in @(Get-ChildItem -LiteralPath $redactionDir -File | Where-Object { $_.Name -notlike '*LOCAL-ONLY*' })) {
+        $content = Get-Content -LiteralPath $file.FullName -Raw
+        foreach ($pattern in $forbidden) {
+            if ($content -match $pattern) { throw "Redaction failure: '$pattern' leaked into $($file.Name)" }
+        }
+    }
+    Write-Host "[OK] Redaction: no tokens, UPNs, GUIDs or resource names leaked into shareable log files"
+}
+finally {
+    Remove-Item -LiteralPath $redactionDir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if (-not $SkipNpmInstall) {
     if (Test-Path -LiteralPath (Join-Path $root 'package-lock.json')) {

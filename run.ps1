@@ -21,9 +21,23 @@ param(
     [switch]$SkipKeyVaultAccessPolicies,
     [switch]$FullRoleDefinitionScan,
     [switch]$NoGroupExpansion,
-    [int]$MaxGroupDepth = 10,
-    [int]$Parallel = 1,
+    [switch]$IncludeOtherTenants,
+    [switch]$DeepScopeScan,
+    [ValidateRange(1, 10)][int]$MaxGroupDepth = 10,
+    [int]$MaxGroupMembers = 0,
+    [ValidateRange(1, 32)][int]$Parallel = 1,
     [int]$LimitResources = 0,
+    [switch]$EmitJson,
+    [switch]$NoHttp,
+    [ValidateSet('Error', 'Warn', 'Info', 'Debug', 'Trace')][string]$LogLevel = 'Info',
+    [int]$MaxLogMegabytes = 50,
+    [switch]$RedactLogs,
+    [switch]$SupportBundle,
+    [switch]$IncludeData,
+    [switch]$Quiet,
+    [switch]$NoColor,
+    [switch]$NoProgress,
+    [switch]$NoTranscript,
     [switch]$ContinueOnError,
     [switch]$FailFast
 )
@@ -31,8 +45,26 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$modulePath = Join-Path $PSScriptRoot 'lib\AzureScannerCommon.psm1'
-Import-Module $modulePath -Force
+Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerCommon.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerLog.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerUI.psm1') -Force -DisableNameChecking
+
+# -Include* forces a collector on, -Skip* forces it off, -Include* wins if both are given.
+function Resolve-CollectorToggle {
+    param([bool]$Include, [bool]$Skip)
+    if ($Include) { return $true }
+    if ($Skip) { return $false }
+    return $true
+}
+
+$doResourceLevel = Resolve-CollectorToggle -Include $IncludeResourceLevel -Skip $SkipResourceLevel
+$doChildDataScopes = Resolve-CollectorToggle -Include $IncludeChildDataScopes -Skip $SkipChildDataScopes
+$doPim = Resolve-CollectorToggle -Include $IncludePim -Skip $SkipPim
+$doBilling = Resolve-CollectorToggle -Include $IncludeBilling -Skip $SkipBilling
+$doReservations = Resolve-CollectorToggle -Include $IncludeReservations -Skip $SkipReservations
+$doClassicAdmins = Resolve-CollectorToggle -Include $IncludeClassicAdmins -Skip $SkipClassicAdmins
+$doKeyVaultAccessPolicies = Resolve-CollectorToggle -Include $IncludeKeyVaultAccessPolicies -Skip $SkipKeyVaultAccessPolicies
+$doGroupExpansion = -not $NoGroupExpansion
 
 function Add-FlatValue {
     param([System.Collections.Generic.List[object]]$List, [AllowNull()]$Value)
@@ -86,7 +118,7 @@ function ConvertTo-CommandLineArgument {
 }
 
 function Invoke-AzJsonWithTimeout {
-    param([Parameter(Mandatory = $true)][string[]]$Arguments, [int]$TimeoutSeconds = 120)
+    param([Parameter(Mandatory = $true)][string[]]$Arguments, [int]$TimeoutSeconds = 120, [string]$Collector = '', [string]$Scope = '')
     $effectiveArgs = @($Arguments)
     $hasOutput = $false
     foreach ($arg in $effectiveArgs) {
@@ -109,6 +141,9 @@ function Invoke-AzJsonWithTimeout {
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $exitCode = -1
+    $stdout = ''
     try {
         [void]$process.Start()
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
@@ -119,11 +154,16 @@ function Invoke-AzJsonWithTimeout {
         }
         $stdout = $stdoutTask.Result
         $stderr = $stderrTask.Result
-        if ($process.ExitCode -ne 0) { throw "az failed ($($process.ExitCode)): $($effectiveArgs -join ' ')`n$stderr" }
+        $exitCode = $process.ExitCode
+        if ($exitCode -ne 0) { throw "az failed ($exitCode): $($effectiveArgs -join ' ')`n$stderr" }
         if ([string]::IsNullOrWhiteSpace($stdout)) { return $null }
-        return $stdout | ConvertFrom-Json
+        return ConvertFrom-JsonSafe -Json $stdout
     }
     finally {
+        $sw.Stop()
+        Write-ScannerApiCall -Collector $Collector -Api (Get-AzApiName -Arguments $effectiveArgs) -Scope $Scope `
+            -DurationMs ([int]$sw.ElapsedMilliseconds) -ExitCode $exitCode -Bytes ([string]$stdout).Length `
+            -Outcome $(if ($exitCode -eq 0) { 'Succeeded' } else { 'Failed' })
         if ($process) { $process.Dispose() }
     }
 }
@@ -299,6 +339,28 @@ Ensure-Directory -Path (Join-Path $context.RunDir 'cache') | Out-Null
 Ensure-Directory -Path (Join-Path $context.RunDir 'raw') | Out-Null
 $reportsDir = Ensure-Directory -Path (Join-Path $context.RunDir 'reports')
 
+$plannedCollectors = @(
+    'StartupValidation', 'Subscriptions', 'ManagementGroups', 'AzureRoleDefinitions', 'AzureTenantRootRbac',
+    'ManagementGroupRbac', 'AzureSubscriptionRbac', 'ScopeInventory', 'AzureResourceGroupRbac'
+)
+if ($doResourceLevel) { $plannedCollectors += 'AzureResourceRbac' }
+if ($doChildDataScopes) { $plannedCollectors += 'StorageChildScopeRbac' }
+$plannedCollectors += 'EntraRoleAssignments'
+if ($doGroupExpansion) { $plannedCollectors += 'GroupExpansion' }
+$plannedCollectors += @('PrincipalResolution', 'ServicePrincipalOwners')
+if ($doKeyVaultAccessPolicies) { $plannedCollectors += 'KeyVaultAccessPolicies' }
+if ($doPim) { $plannedCollectors += @('PimDirectoryAssignments', 'PimAzureAssignments') }
+if ($doBilling) { $plannedCollectors += 'BillingAccess' }
+if ($doReservations) { $plannedCollectors += 'ReservationAccess' }
+if ($doClassicAdmins) { $plannedCollectors += 'ClassicAdmins' }
+$plannedCollectors += 'WorkbookReport'
+
+Initialize-ScannerLog -LogDirectory $context.LogDir -LogLevel $LogLevel -RedactOnDisk:$RedactLogs -MaxLogMegabytes $MaxLogMegabytes | Out-Null
+Initialize-ScannerUi -Quiet:$Quiet -NoColor:$NoColor -NoProgress:$NoProgress `
+    -CalibrationPath (Join-Path $OutputRoot '.calibration\all-azure-access.json') `
+    -PlannedCollectors $plannedCollectors | Out-Null
+if ($NoHttp) { Disable-ScannerHttp }
+
 $script:AccessRows = [System.Collections.Generic.List[object]]::new()
 $script:DirectRows = [System.Collections.Generic.List[object]]::new()
 $script:EffectiveRows = [System.Collections.Generic.List[object]]::new()
@@ -320,6 +382,10 @@ $script:Subscriptions = @()
 $script:ManagementGroups = @()
 $script:Resources = [System.Collections.Generic.List[object]]::new()
 $script:ResourceGroups = [System.Collections.Generic.List[object]]::new()
+$script:SubscriptionRbacCovered = @{}
+$script:UnreachableSubscriptions = @{}
+$script:LastHeartbeat = $null
+$script:HttpReady = $false
 $script:TenantId = ''
 
 function Add-ErrorRow {
@@ -333,6 +399,8 @@ function Add-ErrorRow {
         errorMessage = $Message
         generatedUtc = Get-UtcTimestamp
     })
+    $level = if ($Status -eq 'Skipped') { 'Info' } elseif ($Status -eq 'Failed') { 'Error' } else { 'Warn' }
+    Write-ScannerEvent -Level $level -Collector $Collector -EventName 'collector-issue' -Message $Message -Scope $Scope -Api $Api -ErrorCode $ErrorCode
 }
 
 function Add-CollectorStatus {
@@ -354,11 +422,14 @@ function Invoke-Collector {
     param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock, [switch]$Optional)
     $started = [DateTime]::UtcNow
     $rowsBefore = $script:AccessRows.Count
-    Write-Host "[START] $Name"
+    Start-ScannerPhase -Name $Name
+    Write-ScannerEvent -Level 'Info' -Collector $Name -EventName 'collector-start'
     try {
         & $ScriptBlock
+        $added = $script:AccessRows.Count - $rowsBefore
         Add-CollectorStatus -Collector $Name -Status 'Succeeded' -StartedUtc $started -RowsBefore $rowsBefore
-        Write-Host "[OK] $Name rows+=$($script:AccessRows.Count - $rowsBefore)"
+        Write-ScannerEvent -Level 'Info' -Collector $Name -EventName 'collector-end' -DurationMs ([int]([DateTime]::UtcNow - $started).TotalMilliseconds) -Data @{ status = 'Succeeded'; rowsAdded = $added; totalRows = $script:AccessRows.Count }
+        Complete-ScannerPhase -Name $Name -Status 'Succeeded' -RowsAdded $added
     }
     catch {
         $message = $_.Exception.Message
@@ -366,12 +437,28 @@ function Invoke-Collector {
         if ($message -match '(?i)authorization|unauthori[sz]ed|forbidden|insufficient privileges|does not have authorization|authentication') { $status = 'Unauthorized' }
         elseif ($message -match '(?i)throttl|too many requests|429') { $status = 'Throttled' }
         elseif ($script:AccessRows.Count -gt $rowsBefore) { $status = 'PartiallyCollected' }
+        $added = $script:AccessRows.Count - $rowsBefore
         Add-CollectorStatus -Collector $Name -Status $status -StartedUtc $started -RowsBefore $rowsBefore -Message $message
         Add-ErrorRow -Collector $Name -Status $status -Message $message
         $safeName = ($Name -replace '[^A-Za-z0-9_.-]', '_')
         Write-JsonFile -Path (Join-Path $errorsDir "$safeName.json") -Data @{ collector = $Name; status = $status; error = $message; generatedUtc = Get-UtcTimestamp }
-        Write-Warning "[$status] $Name failed, continuing: $message"
+        Write-ScannerEvent -Level 'Error' -Collector $Name -EventName 'collector-end' -Message $message -DurationMs ([int]([DateTime]::UtcNow - $started).TotalMilliseconds) -Data @{ status = $status; rowsAdded = $added }
+        Complete-ScannerPhase -Name $Name -Status $status -RowsAdded $added -Message $message
         if ($FailFast -or (-not $Optional -and -not $ContinueOnError)) { throw }
+    }
+}
+
+# Periodic "still alive" marker so a killed run still shows where it stopped.
+function Write-CollectorHeartbeat {
+    param([string]$Collector, [int]$Current, [int]$Total, [string]$Activity = 'working')
+    Set-ScannerPhaseProgress -Current $Current -Total $Total -Activity $Activity
+    if (-not $script:LastHeartbeat) { $script:LastHeartbeat = [DateTime]::UtcNow }
+    if (([DateTime]::UtcNow - $script:LastHeartbeat).TotalSeconds -lt 60) { return }
+    $script:LastHeartbeat = [DateTime]::UtcNow
+    Write-ScannerHeartbeat -Collector $Collector -Rows $script:AccessRows.Count -Current $Current -Total $Total
+    Write-ScannerEvent -Level 'Info' -Collector $Collector -EventName 'heartbeat' -Data @{
+        current = $Current; total = $Total; rows = $script:AccessRows.Count
+        workingSetMb = [math]::Round(([System.Diagnostics.Process]::GetCurrentProcess().WorkingSet64 / 1MB), 0)
     }
 }
 
@@ -501,19 +588,6 @@ function Add-PrincipalResolution {
     [void]$script:PrincipalRows.Add($row)
 }
 
-function Resolve-PrincipalById {
-    param([string]$PrincipalId)
-    if (-not $PrincipalId) { return $null }
-    if ($script:PrincipalById.ContainsKey($PrincipalId)) { return $script:PrincipalById[$PrincipalId] }
-    $url = "https://graph.microsoft.com/v1.0/directoryObjects/$PrincipalId"
-    $obj = Invoke-AzJson -Arguments @('rest', '--method', 'GET', '--url', $url) -AllowError
-    if ($obj) {
-        Add-PrincipalResolution -Principal $obj
-        return $script:PrincipalById[$PrincipalId]
-    }
-    return $null
-}
-
 function Add-AccessRow {
     param([object]$Row, [switch]$Direct, [switch]$Effective, [switch]$GroupDerived, [switch]$OwnerDerived)
     $key = @($Row.collector, $Row.assignmentId, $Row.scope, $Row.roleName, $Row.principalId, $Row.effectivePrincipalId, $Row.accessPath) -join '|'
@@ -552,10 +626,11 @@ function Convert-RoleAssignmentToRow {
 
 function Add-RoleAssignmentsForScope {
     param([string]$Collector, [string]$Scope, [string]$SubscriptionId = '', [string]$SubscriptionName = '', [string]$ManagementGroupId = '', [string]$ManagementGroupName = '', [switch]$IncludeInherited)
-    $roleAssignmentArgs = @('role', 'assignment', 'list', '--all', '--scope', $Scope)
+    # az rejects --all together with --scope ('group or scope are not required when --all is used').
+    $roleAssignmentArgs = @('role', 'assignment', 'list', '--scope', $Scope)
     if ($IncludeInherited) { $roleAssignmentArgs += '--include-inherited' }
     if ($SubscriptionId) { $roleAssignmentArgs += @('--subscription', $SubscriptionId) }
-    try { $assignments = Invoke-AzJsonWithTimeout -Arguments $roleAssignmentArgs -TimeoutSeconds 180 }
+    try { $assignments = Invoke-AzJsonWithTimeout -Arguments $roleAssignmentArgs -TimeoutSeconds 180 -Collector $Collector -Scope $Scope }
     catch {
         Add-ErrorRow -Collector $Collector -Status 'PartiallyCollected' -Scope $Scope -Api 'az role assignment list' -Message $_.Exception.Message
         return
@@ -567,21 +642,164 @@ function Add-RoleAssignmentsForScope {
     }
 }
 
-Write-Host "[START] all-azure-access run $($context.RunId)"
+# Depth 10 means "no limit", which Graph answers in one transitiveMembers call.
+# A smaller limit requires walking direct members level by level.
+function Get-GroupMembership {
+    param([string]$GroupId, [int]$MaxDepth = 10, [int]$MaxMembers = 0)
+    $encoded = [uri]::EscapeDataString($GroupId)
+    $select = 'id,displayName,userPrincipalName,mail,appId'
+    $members = [System.Collections.Generic.List[object]]::new()
+    $truncated = $false
+
+    if ($MaxDepth -ge 10) {
+        $url = "https://graph.microsoft.com/v1.0/groups/$encoded/transitiveMembers?`$select=$select&`$top=999"
+        foreach ($member in @(Get-GraphPagedItems -Url $url -Collector 'GroupExpansion')) {
+            if ($MaxMembers -gt 0 -and $members.Count -ge $MaxMembers) { $truncated = $true; break }
+            [void]$members.Add($member)
+        }
+        return [pscustomobject]@{ Members = @($members); Truncated = $truncated }
+    }
+
+    $seen = @{ $GroupId = $true }
+    $frontier = @($GroupId)
+    for ($depth = 1; $depth -le $MaxDepth; $depth++) {
+        $next = [System.Collections.Generic.List[object]]::new()
+        foreach ($current in $frontier) {
+            $currentEncoded = [uri]::EscapeDataString([string]$current)
+            $url = "https://graph.microsoft.com/v1.0/groups/$currentEncoded/members?`$select=$select&`$top=999"
+            foreach ($member in @(Get-GraphPagedItems -Url $url -Collector 'GroupExpansion')) {
+                $memberId = Get-PropertyText -Object $member -Names @('id')
+                if (-not $memberId -or $seen.ContainsKey($memberId)) { continue }
+                $seen[$memberId] = $true
+                if ($MaxMembers -gt 0 -and $members.Count -ge $MaxMembers) { $truncated = $true; break }
+                [void]$members.Add($member)
+                if ((ConvertTo-PrincipalType (Get-PropertyText -Object $member -Names @('@odata.type'))) -eq 'Group') { [void]$next.Add($memberId) }
+            }
+            if ($truncated) { break }
+        }
+        if ($truncated -or $next.Count -eq 0) { break }
+        $frontier = @($next)
+    }
+    return [pscustomobject]@{ Members = @($members); Truncated = $truncated }
+}
+
+function Get-CoverageSummary {
+    return [ordered]@{
+        generatedUtc = Get-UtcTimestamp
+        runDir = $context.RunDir
+        subscriptionsDiscovered = $script:Subscriptions.Count
+        managementGroupsDiscovered = $script:ManagementGroups.Count
+        resourceGroupsDiscovered = $script:ResourceGroups.Count
+        resourcesDiscovered = $script:Resources.Count
+        scopesDiscovered = $script:ScopeRows.Count
+        roleDefinitionsDiscovered = $script:RoleRows.Count
+        directAssignments = $script:DirectRows.Count
+        effectiveAssignments = $script:EffectiveRows.Count
+        groupDerivedAssignments = $script:GroupRows.Count
+        servicePrincipalOwnerRows = $script:OwnerRows.Count
+        collectorFailures = @($script:StatusRows | Where-Object { $_.status -ne 'Succeeded' -and $_.status -ne 'Skipped' }).Count
+        skippedCollectors = @($script:StatusRows | Where-Object { $_.status -eq 'Skipped' }).Count
+        options = @{
+            subscriptionIds = @($SubscriptionIds)
+            managementGroupIds = @($ManagementGroupIds)
+            resourceTypes = @($ResourceTypes)
+            resourceLevel = $doResourceLevel
+            childDataScopes = $doChildDataScopes
+            pim = $doPim
+            billing = $doBilling
+            reservations = $doReservations
+            classicAdmins = $doClassicAdmins
+            keyVaultAccessPolicies = $doKeyVaultAccessPolicies
+            groupExpansion = $doGroupExpansion
+            fullRoleDefinitionScan = [bool]$FullRoleDefinitionScan
+            includeOtherTenants = [bool]$IncludeOtherTenants
+            deepScopeScan = [bool]$DeepScopeScan
+            maxGroupDepth = $MaxGroupDepth
+            maxGroupMembers = $MaxGroupMembers
+            parallel = $Parallel
+            limitResources = $LimitResources
+        }
+    }
+}
+
+# Written from the WorkbookReport collector AND from finally, so an aborted run still
+# leaves behind everything needed to diagnose it.
+function Write-DiagnosticOutputs {
+    Export-ObjectList -Path (Join-Path $context.OutDir 'collectorStatus.csv') -Columns @('collector','status','startedUtc','endedUtc','durationSeconds','rowsAdded','totalRows','message') -Rows @($script:StatusRows)
+    Export-ObjectList -Path (Join-Path $context.OutDir 'errorsWarnings.csv') -Columns @('collector','status','scope','api','errorCode','errorMessage','generatedUtc') -Rows @($script:ErrorRows)
+    Write-JsonFile -Path (Join-Path $context.OutDir 'coverageSummary.json') -Data (Get-CoverageSummary) -Depth 10
+    Write-JsonFile -Path (Join-Path $context.OutDir 'counts.json') -Data ([ordered]@{
+        generatedUtc = Get-UtcTimestamp
+        accessRows = $script:AccessRows.Count
+        directRows = $script:DirectRows.Count
+        effectiveRows = $script:EffectiveRows.Count
+        groupDerivedRows = $script:GroupRows.Count
+        ownerRows = $script:OwnerRows.Count
+        principalRows = $script:PrincipalRows.Count
+        groupExpansionRows = $script:GroupExpansionRows.Count
+        roleRows = $script:RoleRows.Count
+        scopeRows = $script:ScopeRows.Count
+        errorRows = $script:ErrorRows.Count
+    }) -Depth 4
+}
+
+Write-ScannerLine -Text ('All Azure access scan  run {0}' -f $context.RunId) -Level 'Header'
+Write-ScannerLine -Text ('Run directory: {0}' -f $context.RunDir) -Level 'Detail'
 Write-Host "RUN_DIR=$($context.RunDir)"
-Start-Transcript -Path (Join-Path $context.LogDir 'all-azure-access.log') -Force | Out-Null
+if (-not $NoTranscript) {
+    Start-Transcript -Path (Join-Path $context.LogDir 'all-azure-access.log') -Force | Out-Null
+}
+
+Write-JsonFile -Path (Join-Path $context.LogDir 'environment.json') -Data (Get-ScannerEnvironment -Extra @{
+    runId = $context.RunId; jobId = $context.JobId; scannerRoot = $PSScriptRoot
+}) -Depth 6
+Write-JsonFile -Path (Join-Path $context.LogDir 'parameters.json') -Data ([ordered]@{
+    generatedUtc = Get-UtcTimestamp
+    bound = ($PSBoundParameters.Keys | Sort-Object)
+    effective = [ordered]@{
+        subscriptionIds = @($SubscriptionIds); managementGroupIds = @($ManagementGroupIds); resourceTypes = @($ResourceTypes)
+        resourceLevel = $doResourceLevel; childDataScopes = $doChildDataScopes; pim = $doPim; billing = $doBilling
+        reservations = $doReservations; classicAdmins = $doClassicAdmins; keyVaultAccessPolicies = $doKeyVaultAccessPolicies
+        groupExpansion = $doGroupExpansion; maxGroupDepth = $MaxGroupDepth; maxGroupMembers = $MaxGroupMembers
+        parallel = $Parallel; limitResources = $LimitResources; deepScopeScan = [bool]$DeepScopeScan
+        includeOtherTenants = [bool]$IncludeOtherTenants; fullRoleDefinitionScan = [bool]$FullRoleDefinitionScan
+        logLevel = $LogLevel; redactLogs = [bool]$RedactLogs; noHttp = [bool]$NoHttp; emitJson = [bool]$EmitJson
+    }
+}) -Depth 6
 
 try {
     Invoke-Collector -Name 'StartupValidation' -ScriptBlock {
         Resolve-AzCommand | Out-Null
-        $account = Invoke-AzJson -Arguments @('account', 'show') -AllowError
+        $account = Invoke-AzJson -Arguments @('account', 'show') -AllowError -Collector 'StartupValidation'
         if (-not $account) { throw 'Azure CLI is not logged in or account show returned no data.' }
         $script:TenantId = Get-PropertyText -Object $account -Names @('tenantId')
         Add-ScopeRow -Scope '/' -ScopeType 'tenantRoot' -DisplayName 'Tenant Root' -Collector 'StartupValidation'
+
+        $script:HttpReady = $false
+        if (-not $NoHttp) {
+            $script:HttpReady = Test-ScannerHttpAvailable -Resource 'https://graph.microsoft.com/'
+            if (-not $script:HttpReady) {
+                Disable-ScannerHttp
+                Add-ErrorRow -Collector 'StartupValidation' -Status 'Skipped' -ErrorCode 'HttpUnavailable' `
+                    -Message 'Could not acquire a Microsoft Graph token directly; falling back to one az process per Graph call (much slower).'
+            }
+        }
+        Write-ScannerEvent -Level 'Info' -Collector 'StartupValidation' -EventName 'transport' -Data @{
+            directHttp = [bool]$script:HttpReady; parallel = $Parallel
+        }
+        Write-ScannerLine -Text ('     transport: {0} | parallel: {1}' -f $(if ($script:HttpReady) { 'direct HTTP + cached token' } else { 'az CLI per call' }), $Parallel) -Level 'Detail'
     }
 
     Invoke-Collector -Name 'Subscriptions' -ScriptBlock {
-        $script:Subscriptions = @(Get-AzSubscriptions -SubscriptionIds $SubscriptionIds -IncludeAllStates | Where-Object { [string]$_.state -eq 'Enabled' -or $SubscriptionIds.Count -gt 0 })
+        $discovered = @(Get-AzSubscriptions -SubscriptionIds $SubscriptionIds -IncludeAllStates | Where-Object { [string]$_.state -eq 'Enabled' -or $SubscriptionIds.Count -gt 0 })
+        if (-not $IncludeOtherTenants -and $script:TenantId -and $SubscriptionIds.Count -eq 0) {
+            foreach ($sub in @($discovered | Where-Object { $_.tenantId -and [string]$_.tenantId -ne $script:TenantId })) {
+                Add-ErrorRow -Collector 'Subscriptions' -Status 'Skipped' -Scope ("/subscriptions/{0}" -f $sub.id) -Api 'az account list' -ErrorCode 'ForeignTenant' `
+                    -Message ("Subscription is homed in tenant {0}, not the signed-in tenant {1}; token acquisition would fail. Re-run with -IncludeOtherTenants to attempt it." -f $sub.tenantId, $script:TenantId)
+            }
+            $discovered = @($discovered | Where-Object { -not $_.tenantId -or [string]$_.tenantId -eq $script:TenantId })
+        }
+        $script:Subscriptions = $discovered
         if ($script:Subscriptions.Count -eq 0) { throw 'No enabled Azure subscriptions were returned.' }
         foreach ($sub in $script:Subscriptions) {
             Add-ScopeRow -Scope ("/subscriptions/{0}" -f $sub.id) -ScopeType 'subscription' -DisplayName $sub.name -SubscriptionId $sub.id -SubscriptionName $sub.name -Collector 'Subscriptions'
@@ -589,7 +807,7 @@ try {
     }
 
     Invoke-Collector -Name 'ManagementGroups' -Optional -ScriptBlock {
-        $items = Invoke-AzJson -Arguments @('account', 'management-group', 'list') -AllowError
+        $items = Invoke-AzJson -Arguments @('account', 'management-group', 'list') -AllowError -Collector 'ManagementGroups'
         $script:ManagementGroups = @(Expand-FlatArray -InputObject $items)
         if ($ManagementGroupIds.Count -gt 0) {
             $wanted = @($ManagementGroupIds | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
@@ -638,69 +856,129 @@ try {
     }
 
     Invoke-Collector -Name 'ManagementGroupRbac' -Optional -ScriptBlock {
+        $index = 0
         foreach ($mg in $script:ManagementGroups) {
+            $index++
             $mgId = Get-PropertyText -Object $mg -Names @('name', 'id')
             $displayName = Get-PropertyText -Object $mg -Names @('displayName', 'name')
             if (-not $mgId) { continue }
+            Write-CollectorHeartbeat -Collector 'ManagementGroupRbac' -Current $index -Total $script:ManagementGroups.Count -Activity $displayName
             Add-RoleAssignmentsForScope -Collector 'ManagementGroupRbac' -Scope "/providers/Microsoft.Management/managementGroups/$mgId" -ManagementGroupId $mgId -ManagementGroupName $displayName -IncludeInherited
         }
     }
 
     Invoke-Collector -Name 'AzureSubscriptionRbac' -ScriptBlock {
+        $jobs = @($script:Subscriptions | ForEach-Object {
+            @{ Key = [string]$_.id; Arguments = @('role', 'assignment', 'list', '--all', '--include-inherited', '--subscription', $_.id) }
+        })
+        $total = $jobs.Count
+        $results = Invoke-AzJsonParallel -Jobs $jobs -Throttle $Parallel -TimeoutSeconds 900 -Collector 'AzureSubscriptionRbac' -OnProgress {
+            param($done, $count)
+            Write-CollectorHeartbeat -Collector 'AzureSubscriptionRbac' -Current $done -Total $count -Activity 'enumerating subscriptions'
+        }
         foreach ($sub in $script:Subscriptions) {
-            try { $assignments = Invoke-AzJsonWithTimeout -Arguments @('role', 'assignment', 'list', '--all', '--include-inherited', '--subscription', $sub.id) -TimeoutSeconds 180 }
-            catch {
-                Add-ErrorRow -Collector 'AzureSubscriptionRbac' -Status 'PartiallyCollected' -Scope ("/subscriptions/{0}" -f $sub.id) -Api 'az role assignment list' -Message $_.Exception.Message
+            $result = $results[[string]$sub.id]
+            if (-not $result -or -not $result.Ok) {
+                $message = if ($result) { $result.Error } else { 'No result returned for subscription.' }
+                if ($message -match '(?i)AADSTS|interactive authentication is needed') { $script:UnreachableSubscriptions[[string]$sub.id] = $true }
+                Add-ErrorRow -Collector 'AzureSubscriptionRbac' -Status 'PartiallyCollected' -Scope ("/subscriptions/{0}" -f $sub.id) -Api 'az role assignment list' -Message $message
                 continue
             }
-            foreach ($assignment in @(Expand-FlatArray -InputObject $assignments)) {
+            # This one call returns every assignment in the subscription, at every nested scope.
+            $script:SubscriptionRbacCovered[[string]$sub.id] = $true
+            foreach ($assignment in @(Expand-FlatArray -InputObject $result.Data)) {
                 if (-not (Test-RoleAssignmentObject -Assignment $assignment)) { continue }
                 $row = Convert-RoleAssignmentToRow -Assignment $assignment -Collector 'AzureSubscriptionRbac' -SubscriptionId $sub.id -SubscriptionName $sub.name
                 Add-AccessRow -Row $row -Direct -Effective
             }
         }
+        Set-ScannerPhaseProgress -Current $total -Total $total -Activity 'done'
     }
 
     Invoke-Collector -Name 'ScopeInventory' -Optional -ScriptBlock {
-        foreach ($sub in $script:Subscriptions) {
-            $groups = Invoke-AzJson -Arguments @('group', 'list', '--subscription', $sub.id) -AllowError
-            foreach ($group in @(Expand-FlatArray -InputObject $groups)) {
-                $rgName = Get-PropertyText -Object $group -Names @('name')
-                [void]$script:ResourceGroups.Add([pscustomobject]@{ subscriptionId = $sub.id; subscriptionName = $sub.name; resourceGroup = $rgName; scope = Get-PropertyText -Object $group -Names @('id') })
-                Add-ScopeRow -Scope (Get-PropertyText -Object $group -Names @('id')) -ScopeType 'resourceGroup' -DisplayName $rgName -SubscriptionId $sub.id -SubscriptionName $sub.name -ResourceGroup $rgName -Collector 'ScopeInventory'
+        $targets = @($script:Subscriptions | Where-Object { -not $script:UnreachableSubscriptions.ContainsKey([string]$_.id) })
+        $jobs = [System.Collections.Generic.List[object]]::new()
+        foreach ($sub in $targets) {
+            [void]$jobs.Add(@{ Key = ('rg|' + $sub.id); Arguments = @('group', 'list', '--subscription', $sub.id, '--query', '[].{id:id,name:name}') })
+            if ($doResourceLevel) {
+                [void]$jobs.Add(@{ Key = ('res|' + $sub.id); Arguments = @('resource', 'list', '--subscription', $sub.id, '--query', '[].{id:id,name:name,type:type,resourceGroup:resourceGroup}') })
             }
-            if (-not $SkipResourceLevel) {
-                $resources = Invoke-AzJson -Arguments @('resource', 'list', '--subscription', $sub.id) -AllowError
-                $resourceArray = @(Expand-FlatArray -InputObject $resources)
-                if ($ResourceTypes.Count -gt 0) {
-                    $wantedTypes = @($ResourceTypes | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Where-Object { $_ })
-                    $resourceArray = @($resourceArray | Where-Object { $wantedTypes -contains ([string]$_.type).ToLowerInvariant() })
-                }
-                if ($LimitResources -gt 0) { $resourceArray = @($resourceArray | Select-Object -First $LimitResources) }
-                foreach ($resource in $resourceArray) {
-                    $resourceScope = Get-PropertyText -Object $resource -Names @('id')
-                    $resourceName = Get-PropertyText -Object $resource -Names @('name')
-                    $resourceType = Get-PropertyText -Object $resource -Names @('type')
-                    $rgName = Get-ResourceGroupFromScope -Scope $resourceScope
-                    [void]$script:Resources.Add([pscustomobject]@{ subscriptionId = $sub.id; subscriptionName = $sub.name; resourceGroup = $rgName; resourceId = $resourceScope; name = $resourceName; type = $resourceType })
-                    Add-ScopeRow -Scope $resourceScope -ScopeType 'resource' -DisplayName $resourceName -SubscriptionId $sub.id -SubscriptionName $sub.name -ResourceGroup $rgName -ResourceType $resourceType -ResourceName $resourceName -Collector 'ScopeInventory'
+        }
+        $results = Invoke-AzJsonParallel -Jobs @($jobs) -Throttle $Parallel -TimeoutSeconds 900 -Collector 'ScopeInventory' -OnProgress {
+            param($done, $count)
+            Write-CollectorHeartbeat -Collector 'ScopeInventory' -Current $done -Total $count -Activity 'inventorying scopes'
+        }
+
+        foreach ($sub in $targets) {
+            $rgResult = $results[('rg|' + $sub.id)]
+            if ($rgResult -and $rgResult.Ok) {
+                foreach ($group in @(Expand-FlatArray -InputObject $rgResult.Data)) {
+                    $rgName = Get-PropertyText -Object $group -Names @('name')
+                    $rgScope = Get-PropertyText -Object $group -Names @('id')
+                    [void]$script:ResourceGroups.Add([pscustomobject]@{ subscriptionId = $sub.id; subscriptionName = $sub.name; resourceGroup = $rgName; scope = $rgScope })
+                    Add-ScopeRow -Scope $rgScope -ScopeType 'resourceGroup' -DisplayName $rgName -SubscriptionId $sub.id -SubscriptionName $sub.name -ResourceGroup $rgName -Collector 'ScopeInventory'
                 }
             }
+            elseif ($rgResult) {
+                Add-ErrorRow -Collector 'ScopeInventory' -Status 'PartiallyCollected' -Scope ("/subscriptions/{0}" -f $sub.id) -Api 'az group list' -Message $rgResult.Error
+            }
+
+            if (-not $doResourceLevel) { continue }
+            $resResult = $results[('res|' + $sub.id)]
+            if (-not $resResult -or -not $resResult.Ok) {
+                if ($resResult) { Add-ErrorRow -Collector 'ScopeInventory' -Status 'PartiallyCollected' -Scope ("/subscriptions/{0}" -f $sub.id) -Api 'az resource list' -Message $resResult.Error }
+                continue
+            }
+            $resourceArray = @(Expand-FlatArray -InputObject $resResult.Data)
+            if ($ResourceTypes.Count -gt 0) {
+                $wantedTypes = @($ResourceTypes | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } | Where-Object { $_ })
+                $resourceArray = @($resourceArray | Where-Object { $wantedTypes -contains ([string]$_.type).ToLowerInvariant() })
+            }
+            if ($LimitResources -gt 0) { $resourceArray = @($resourceArray | Select-Object -First $LimitResources) }
+            foreach ($resource in $resourceArray) {
+                $resourceScope = Get-PropertyText -Object $resource -Names @('id')
+                $resourceName = Get-PropertyText -Object $resource -Names @('name')
+                $resourceType = Get-PropertyText -Object $resource -Names @('type')
+                $rgName = Get-ResourceGroupFromScope -Scope $resourceScope
+                [void]$script:Resources.Add([pscustomobject]@{ subscriptionId = $sub.id; subscriptionName = $sub.name; resourceGroup = $rgName; resourceId = $resourceScope; name = $resourceName; type = $resourceType })
+                Add-ScopeRow -Scope $resourceScope -ScopeType 'resource' -DisplayName $resourceName -SubscriptionId $sub.id -SubscriptionName $sub.name -ResourceGroup $rgName -ResourceType $resourceType -ResourceName $resourceName -Collector 'ScopeInventory'
+            }
+        }
+        Write-ScannerEvent -Level 'Info' -Collector 'ScopeInventory' -EventName 'inventory' -Data @{
+            subscriptions = $targets.Count; resourceGroups = $script:ResourceGroups.Count; resources = $script:Resources.Count
         }
     }
 
     Invoke-Collector -Name 'AzureResourceGroupRbac' -Optional -ScriptBlock {
+        $covered = 0
+        $index = 0
         foreach ($rg in $script:ResourceGroups) {
+            $index++
             if (-not $rg.scope) { continue }
+            if (-not $DeepScopeScan -and $script:SubscriptionRbacCovered.ContainsKey([string]$rg.subscriptionId)) { $covered++; continue }
+            Write-CollectorHeartbeat -Collector 'AzureResourceGroupRbac' -Current $index -Total $script:ResourceGroups.Count -Activity $rg.resourceGroup
             Add-RoleAssignmentsForScope -Collector 'AzureResourceGroupRbac' -Scope $rg.scope -SubscriptionId $rg.subscriptionId -SubscriptionName $rg.subscriptionName -IncludeInherited
+        }
+        if ($covered -gt 0) {
+            Add-ErrorRow -Collector 'AzureResourceGroupRbac' -Status 'Skipped' -Api 'az role assignment list' -ErrorCode 'AlreadyCovered' `
+                -Message ("{0} resource groups were already enumerated by AzureSubscriptionRbac; use -DeepScopeScan to query each scope individually." -f $covered)
         }
     }
 
-    if (-not $SkipResourceLevel) {
+    if ($doResourceLevel) {
         Invoke-Collector -Name 'AzureResourceRbac' -Optional -ScriptBlock {
+            $covered = 0
+            $index = 0
             foreach ($resource in $script:Resources) {
+                $index++
                 if (-not $resource.resourceId) { continue }
+                if (-not $DeepScopeScan -and $script:SubscriptionRbacCovered.ContainsKey([string]$resource.subscriptionId)) { $covered++; continue }
+                Write-CollectorHeartbeat -Collector 'AzureResourceRbac' -Current $index -Total $script:Resources.Count -Activity $resource.name
                 Add-RoleAssignmentsForScope -Collector 'AzureResourceRbac' -Scope $resource.resourceId -SubscriptionId $resource.subscriptionId -SubscriptionName $resource.subscriptionName -IncludeInherited
+            }
+            if ($covered -gt 0) {
+                Add-ErrorRow -Collector 'AzureResourceRbac' -Status 'Skipped' -Api 'az role assignment list' -ErrorCode 'AlreadyCovered' `
+                    -Message ("{0} resources were already enumerated by AzureSubscriptionRbac; use -DeepScopeScan to query each scope individually." -f $covered)
             }
         }
     }
@@ -708,23 +986,42 @@ try {
         Add-CollectorStatus -Collector 'AzureResourceRbac' -Status 'Skipped' -StartedUtc ([DateTime]::UtcNow) -RowsBefore $script:AccessRows.Count -Message 'Skipped by -SkipResourceLevel'
     }
 
-    if (-not $SkipChildDataScopes) {
+    if ($doChildDataScopes) {
         Invoke-Collector -Name 'StorageChildScopeRbac' -Optional -ScriptBlock {
             $storageAccounts = @($script:Resources | Where-Object { [string]$_.type -eq 'Microsoft.Storage/storageAccounts' })
+            if ($storageAccounts.Count -eq 0) { return }
+            $jobs = [System.Collections.Generic.List[object]]::new()
             foreach ($sa in $storageAccounts) {
-                $containers = Invoke-AzJson -Arguments @('storage', 'container-rm', 'list', '--storage-account', $sa.name, '--resource-group', $sa.resourceGroup, '--subscription', $sa.subscriptionId) -AllowError
-                foreach ($container in @(Expand-FlatArray -InputObject $containers)) {
-                    $containerName = Get-PropertyText -Object $container -Names @('name')
-                    $scope = "/subscriptions/$($sa.subscriptionId)/resourceGroups/$($sa.resourceGroup)/providers/Microsoft.Storage/storageAccounts/$($sa.name)/blobServices/default/containers/$containerName"
-                    Add-ScopeRow -Scope $scope -ScopeType 'storageChildScope' -DisplayName $containerName -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -ResourceGroup $sa.resourceGroup -ResourceType 'Microsoft.Storage/storageAccounts/blobServices/containers' -ResourceName $sa.name -Collector 'StorageChildScopeRbac'
-                    Add-RoleAssignmentsForScope -Collector 'StorageChildScopeRbac' -Scope $scope -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -IncludeInherited
+                [void]$jobs.Add(@{ Key = ('c|' + $sa.resourceId); Arguments = @('storage', 'container-rm', 'list', '--storage-account', $sa.name, '--resource-group', $sa.resourceGroup, '--subscription', $sa.subscriptionId, '--query', '[].{name:name}') })
+                [void]$jobs.Add(@{ Key = ('s|' + $sa.resourceId); Arguments = @('storage', 'share-rm', 'list', '--storage-account', $sa.name, '--resource-group', $sa.resourceGroup, '--subscription', $sa.subscriptionId, '--query', '[].{name:name}') })
+            }
+            $results = Invoke-AzJsonParallel -Jobs @($jobs) -Throttle $Parallel -TimeoutSeconds 600 -Collector 'StorageChildScopeRbac' -OnProgress {
+                param($done, $count)
+                Write-CollectorHeartbeat -Collector 'StorageChildScopeRbac' -Current $done -Total $count -Activity 'listing containers and shares'
+            }
+            foreach ($sa in $storageAccounts) {
+                $childScopeCovered = (-not $DeepScopeScan -and $script:SubscriptionRbacCovered.ContainsKey([string]$sa.subscriptionId))
+                $containerResult = $results[('c|' + $sa.resourceId)]
+                if ($containerResult -and $containerResult.Ok) {
+                    foreach ($container in @(Expand-FlatArray -InputObject $containerResult.Data)) {
+                        $containerName = Get-PropertyText -Object $container -Names @('name')
+                        if (-not $containerName) { continue }
+                        $scope = "/subscriptions/$($sa.subscriptionId)/resourceGroups/$($sa.resourceGroup)/providers/Microsoft.Storage/storageAccounts/$($sa.name)/blobServices/default/containers/$containerName"
+                        Add-ScopeRow -Scope $scope -ScopeType 'storageChildScope' -DisplayName $containerName -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -ResourceGroup $sa.resourceGroup -ResourceType 'Microsoft.Storage/storageAccounts/blobServices/containers' -ResourceName $sa.name -Collector 'StorageChildScopeRbac'
+                        if ($childScopeCovered) { continue }
+                        Add-RoleAssignmentsForScope -Collector 'StorageChildScopeRbac' -Scope $scope -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -IncludeInherited
+                    }
                 }
-                $shares = Invoke-AzJson -Arguments @('storage', 'share-rm', 'list', '--storage-account', $sa.name, '--resource-group', $sa.resourceGroup, '--subscription', $sa.subscriptionId) -AllowError
-                foreach ($share in @(Expand-FlatArray -InputObject $shares)) {
-                    $shareName = Get-PropertyText -Object $share -Names @('name')
-                    $scope = "/subscriptions/$($sa.subscriptionId)/resourceGroups/$($sa.resourceGroup)/providers/Microsoft.Storage/storageAccounts/$($sa.name)/fileServices/default/shares/$shareName"
-                    Add-ScopeRow -Scope $scope -ScopeType 'storageChildScope' -DisplayName $shareName -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -ResourceGroup $sa.resourceGroup -ResourceType 'Microsoft.Storage/storageAccounts/fileServices/shares' -ResourceName $sa.name -ChildResourceType 'fileShare' -ChildResourceName $shareName -Collector 'StorageChildScopeRbac'
-                    Add-RoleAssignmentsForScope -Collector 'StorageChildScopeRbac' -Scope $scope -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -IncludeInherited
+                $shareResult = $results[('s|' + $sa.resourceId)]
+                if ($shareResult -and $shareResult.Ok) {
+                    foreach ($share in @(Expand-FlatArray -InputObject $shareResult.Data)) {
+                        $shareName = Get-PropertyText -Object $share -Names @('name')
+                        if (-not $shareName) { continue }
+                        $scope = "/subscriptions/$($sa.subscriptionId)/resourceGroups/$($sa.resourceGroup)/providers/Microsoft.Storage/storageAccounts/$($sa.name)/fileServices/default/shares/$shareName"
+                        Add-ScopeRow -Scope $scope -ScopeType 'storageChildScope' -DisplayName $shareName -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -ResourceGroup $sa.resourceGroup -ResourceType 'Microsoft.Storage/storageAccounts/fileServices/shares' -ResourceName $sa.name -ChildResourceType 'fileShare' -ChildResourceName $shareName -Collector 'StorageChildScopeRbac'
+                        if ($childScopeCovered) { continue }
+                        Add-RoleAssignmentsForScope -Collector 'StorageChildScopeRbac' -Scope $scope -SubscriptionId $sa.subscriptionId -SubscriptionName $sa.subscriptionName -IncludeInherited
+                    }
                 }
             }
         }
@@ -735,7 +1032,7 @@ try {
 
     Invoke-Collector -Name 'EntraRoleAssignments' -Optional -ScriptBlock {
         $url = 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?$expand=roleDefinition($select=id,displayName)&$top=999'
-        $assignments = Get-GraphPagedItems -Url $url
+        $assignments = Get-GraphPagedItems -Url $url -Collector 'EntraRoleAssignments'
         foreach ($assignment in $assignments) {
             $roleName = Get-PropertyText -Object $assignment.roleDefinition -Names @('displayName')
             $roleId = Get-PropertyText -Object $assignment.roleDefinition -Names @('id')
@@ -750,16 +1047,24 @@ try {
         }
     }
 
-    if (-not $NoGroupExpansion) {
+    if ($doGroupExpansion) {
         Invoke-Collector -Name 'GroupExpansion' -Optional -ScriptBlock {
             $groupAssignments = @($script:DirectRows | Where-Object { $_.principalType -eq 'Group' -and $_.principalId })
+            $index = 0
+            $truncatedGroups = 0
             foreach ($assignmentRow in $groupAssignments) {
+                $index++
                 $groupId = [string]$assignmentRow.principalId
+                Write-CollectorHeartbeat -Collector 'GroupExpansion' -Current $index -Total $groupAssignments.Count -Activity 'expanding groups'
                 if (-not $script:GroupMembersById.ContainsKey($groupId)) {
-                    $encoded = [uri]::EscapeDataString($groupId)
-                    $url = "https://graph.microsoft.com/v1.0/groups/$encoded/transitiveMembers?`$select=id,displayName,userPrincipalName,mail,appId&`$top=999"
-                    $members = @(Get-GraphPagedItems -Url $url)
+                    $expansion = Get-GroupMembership -GroupId $groupId -MaxDepth $MaxGroupDepth -MaxMembers $MaxGroupMembers
+                    $members = @($expansion.Members)
                     $script:GroupMembersById[$groupId] = $members
+                    if ($expansion.Truncated) {
+                        $truncatedGroups++
+                        Add-ErrorRow -Collector 'GroupExpansion' -Status 'PartiallyCollected' -Scope $groupId -Api 'Graph group members' -ErrorCode 'MemberLimit' `
+                            -Message ("Group '{0}' has more than {1} members; expansion was truncated by -MaxGroupMembers." -f $assignmentRow.principalDisplayName, $MaxGroupMembers)
+                    }
                     foreach ($member in $members) {
                         Add-PrincipalResolution -Principal $member
                         [void]$script:GroupExpansionRows.Add([pscustomobject]@{
@@ -795,6 +1100,10 @@ try {
                     Add-AccessRow -Row $derived -Effective -GroupDerived
                 }
             }
+            Write-ScannerEvent -Level 'Info' -Collector 'GroupExpansion' -EventName 'expansion' -Data @{
+                groupAssignments = $groupAssignments.Count; distinctGroups = $script:GroupMembersById.Count
+                edges = $script:GroupExpansionRows.Count; truncatedGroups = $truncatedGroups; maxDepth = $MaxGroupDepth
+            }
         }
     }
     else {
@@ -803,26 +1112,73 @@ try {
 
     Invoke-Collector -Name 'PrincipalResolution' -Optional -ScriptBlock {
         $ids = @($script:AccessRows | ForEach-Object { $_.principalId; $_.effectivePrincipalId } | Where-Object { $_ } | Sort-Object -Unique)
+        $batches = [math]::Ceiling($ids.Count / 100)
+        $batchIndex = 0
         for ($offset = 0; $offset -lt $ids.Count; $offset += 100) {
+            $batchIndex++
+            Write-CollectorHeartbeat -Collector 'PrincipalResolution' -Current $batchIndex -Total $batches -Activity 'resolving principals'
             $batch = @($ids | Select-Object -Skip $offset -First 100)
             $body = @{ ids = @($batch); types = @() } | ConvertTo-Json -Depth 4 -Compress
-            $resp = Invoke-AzJson -Arguments @('rest', '--method', 'POST', '--url', 'https://graph.microsoft.com/v1.0/directoryObjects/getByIds', '--headers', 'Content-Type=application/json', '--body', $body) -AllowError
+            $resp = $null
+            if (-not $NoHttp -and $script:HttpReady) {
+                $raw = Invoke-ScannerHttp -Method 'POST' -Url 'https://graph.microsoft.com/v1.0/directoryObjects/getByIds' -Resource 'https://graph.microsoft.com/' -Body $body -Collector 'PrincipalResolution'
+                if ($raw -and $raw.Status -lt 400) { $resp = ConvertFrom-JsonSafe -Json $raw.Body }
+            }
+            if (-not $resp) {
+                $resp = Invoke-AzJson -Arguments @('rest', '--method', 'POST', '--url', 'https://graph.microsoft.com/v1.0/directoryObjects/getByIds', '--headers', 'Content-Type=application/json', '--body', $body) -AllowError -Collector 'PrincipalResolution'
+            }
             $valueProp = if ($resp) { $resp.PSObject.Properties['value'] } else { $null }
             if ($valueProp) {
                 foreach ($principal in @(Expand-FlatArray -InputObject $valueProp.Value)) { Add-PrincipalResolution -Principal $principal }
             }
         }
-        foreach ($id in $ids) {
-            if (-not $script:PrincipalById.ContainsKey($id)) { Resolve-PrincipalById -PrincipalId $id | Out-Null }
+        # getByIds already reports everything the directory knows about. Anything still
+        # missing is deleted or invisible, so per-id retries would just burn calls.
+        $unresolved = @($ids | Where-Object { -not $script:PrincipalById.ContainsKey($_) })
+        if ($unresolved.Count -gt 0) {
+            Add-ErrorRow -Collector 'PrincipalResolution' -Status 'PartiallyCollected' -Api 'Graph directoryObjects/getByIds' -ErrorCode 'UnresolvedPrincipals' `
+                -Message ("{0} of {1} principal ids could not be resolved (most likely deleted directory objects)." -f $unresolved.Count, $ids.Count)
+        }
+        Write-ScannerEvent -Level 'Info' -Collector 'PrincipalResolution' -EventName 'resolution' -Data @{
+            requested = $ids.Count; resolved = ($ids.Count - $unresolved.Count); unresolved = $unresolved.Count
         }
     }
 
     Invoke-Collector -Name 'ServicePrincipalOwners' -Optional -ScriptBlock {
         $spIds = @($script:AccessRows | Where-Object { $_.principalType -eq 'ServicePrincipal' -or $_.effectivePrincipalType -eq 'ServicePrincipal' } | ForEach-Object { $_.principalId; $_.effectivePrincipalId } | Where-Object { $_ } | Sort-Object -Unique)
+        if ($spIds.Count -eq 0) { return }
+
+        $ownersById = @{}
+        $batched = $false
+        if (-not $NoHttp -and $script:HttpReady) {
+            # 20 owner lookups per HTTP round trip instead of one az process each.
+            $requests = @($spIds | ForEach-Object { @{ id = $_; url = ("/servicePrincipals/{0}/owners?`$select=id,displayName,userPrincipalName,mail,appId&`$top=999" -f $_) } })
+            $done = 0
+            for ($offset = 0; $offset -lt $requests.Count; $offset += 200) {
+                $slice = @($requests | Select-Object -Skip $offset -First 200)
+                $responses = Invoke-GraphBatch -Requests $slice -Collector 'ServicePrincipalOwners'
+                if ($null -eq $responses) { $ownersById.Clear(); break }
+                foreach ($key in $responses.Keys) {
+                    $entry = $responses[$key]
+                    if ($entry.Status -ge 400 -or -not $entry.Body) { continue }
+                    $valueProp = $entry.Body.PSObject.Properties['value']
+                    if ($valueProp) { $ownersById[$key] = @(Expand-FlatArray -InputObject $valueProp.Value) }
+                }
+                $done += $slice.Count
+                Write-CollectorHeartbeat -Collector 'ServicePrincipalOwners' -Current $done -Total $requests.Count -Activity 'batched owner lookup'
+                $batched = $true
+            }
+        }
+
+        $index = 0
         foreach ($spId in $spIds) {
-            $sp = Resolve-PrincipalById -PrincipalId $spId
+            $index++
+            Write-CollectorHeartbeat -Collector 'ServicePrincipalOwners' -Current $index -Total $spIds.Count -Activity 'service principal owners'
+            $sp = $script:PrincipalById[$spId]
             $spName = if ($sp) { $sp.displayName } else { $spId }
-            $owners = Get-GraphPagedItems -Url "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/owners?`$select=id,displayName,userPrincipalName,mail,appId&`$top=999"
+            $owners = if ($batched -and $ownersById.ContainsKey($spId)) { @($ownersById[$spId]) }
+                      elseif ($batched) { @() }
+                      else { @(Get-GraphPagedItems -Url "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/owners?`$select=id,displayName,userPrincipalName,mail,appId&`$top=999" -Collector 'ServicePrincipalOwners') }
             foreach ($owner in $owners) {
                 Add-PrincipalResolution -Principal $owner
                 $ownerId = Get-PropertyText -Object $owner -Names @('id')
@@ -837,15 +1193,23 @@ try {
         }
     }
 
-    if (-not $SkipKeyVaultAccessPolicies) {
+    if ($doKeyVaultAccessPolicies) {
         Invoke-Collector -Name 'KeyVaultAccessPolicies' -Optional -ScriptBlock {
             $vaults = @($script:Resources | Where-Object { [string]$_.type -eq 'Microsoft.KeyVault/vaults' })
+            if ($vaults.Count -eq 0) { return }
+            $jobs = @($vaults | ForEach-Object {
+                @{ Key = [string]$_.resourceId; Arguments = @('keyvault', 'show', '--name', $_.name, '--resource-group', $_.resourceGroup, '--subscription', $_.subscriptionId, '--query', 'properties.accessPolicies') }
+            })
+            $results = Invoke-AzJsonParallel -Jobs $jobs -Throttle $Parallel -TimeoutSeconds 300 -Collector 'KeyVaultAccessPolicies' -OnProgress {
+                param($done, $count)
+                Write-CollectorHeartbeat -Collector 'KeyVaultAccessPolicies' -Current $done -Total $count -Activity 'reading vault access policies'
+            }
             foreach ($vault in $vaults) {
-                $details = Invoke-AzJson -Arguments @('keyvault', 'show', '--name', $vault.name, '--resource-group', $vault.resourceGroup, '--subscription', $vault.subscriptionId) -AllowError
-                $policies = @()
-                if ($details -and $details.properties -and $details.properties.accessPolicies) { $policies = @($details.properties.accessPolicies) }
-                foreach ($policy in $policies) {
+                $result = $results[[string]$vault.resourceId]
+                if (-not $result -or -not $result.Ok) { continue }
+                foreach ($policy in @(Expand-FlatArray -InputObject $result.Data)) {
                     $principalId = Get-PropertyText -Object $policy -Names @('objectId')
+                    if (-not $principalId) { continue }
                     $permissions = ConvertTo-CompactJson -Value $policy.permissions
                     $row = New-AccessRow -Surface 'Key Vault Access Policy' -AccessModel 'KeyVaultAccessPolicy' -Collector 'KeyVaultAccessPolicies' -AssignmentState 'Active' -AssignmentType 'AccessPolicy' `
                         -PrincipalId $principalId -PrincipalType 'Unknown' -PrincipalDisplayName $principalId -RoleName 'Key Vault Access Policy' -RoleCategory 'DataPlane' -RoleIsPrivileged $false -RoleHasDataActions $true `
@@ -859,10 +1223,10 @@ try {
         Add-CollectorStatus -Collector 'KeyVaultAccessPolicies' -Status 'Skipped' -StartedUtc ([DateTime]::UtcNow) -RowsBefore $script:AccessRows.Count -Message 'Skipped by -SkipKeyVaultAccessPolicies'
     }
 
-    if (-not $SkipPim) {
+    if ($doPim) {
         Invoke-Collector -Name 'PimDirectoryAssignments' -Optional -ScriptBlock {
             $url = 'https://graph.microsoft.com/v1.0/roleManagement/directory/roleEligibilityScheduleInstances?$expand=roleDefinition($select=id,displayName)&$top=999'
-            $items = Get-GraphPagedItems -Url $url
+            $items = Get-GraphPagedItems -Url $url -Collector 'PimDirectoryAssignments'
             foreach ($item in $items) {
                 $roleName = Get-PropertyText -Object $item.roleDefinition -Names @('displayName')
                 $principalId = Get-PropertyText -Object $item -Names @('principalId')
@@ -876,10 +1240,20 @@ try {
         }
 
         Invoke-Collector -Name 'PimAzureAssignments' -Optional -ScriptBlock {
+            $index = 0
             foreach ($sub in $script:Subscriptions) {
+                $index++
+                Write-CollectorHeartbeat -Collector 'PimAzureAssignments' -Current $index -Total $script:Subscriptions.Count -Activity 'PIM eligibility'
                 $scope = "/subscriptions/$($sub.id)"
                 $url = "https://management.azure.com$scope/providers/Microsoft.Authorization/roleEligibilityScheduleInstances?api-version=2020-10-01"
-                $resp = Invoke-AzJson -Arguments @('rest', '--method', 'GET', '--url', $url) -AllowError
+                $resp = $null
+                if (-not $NoHttp -and $script:HttpReady) {
+                    $raw = Invoke-ScannerHttp -Method 'GET' -Url $url -Resource 'https://management.azure.com/' -Collector 'PimAzureAssignments'
+                    if ($raw -and $raw.Status -lt 400) { $resp = ConvertFrom-JsonSafe -Json $raw.Body }
+                }
+                if (-not $resp) {
+                    $resp = Invoke-AzJson -Arguments @('rest', '--method', 'GET', '--url', $url) -AllowError -Collector 'PimAzureAssignments'
+                }
                 $valueProp = if ($resp) { $resp.PSObject.Properties['value'] } else { $null }
                 $eligibleItems = if ($valueProp) { @(Expand-FlatArray -InputObject $valueProp.Value) } else { @() }
                 foreach ($item in $eligibleItems) {
@@ -900,9 +1274,9 @@ try {
         Add-CollectorStatus -Collector 'PimAzureAssignments' -Status 'Skipped' -StartedUtc ([DateTime]::UtcNow) -RowsBefore $script:AccessRows.Count -Message 'Skipped by -SkipPim'
     }
 
-    if (-not $SkipBilling) {
+    if ($doBilling) {
         Invoke-Collector -Name 'BillingAccess' -Optional -ScriptBlock {
-            $accounts = Invoke-AzJson -Arguments @('billing', 'account', 'list') -AllowError
+            $accounts = Invoke-AzJson -Arguments @('billing', 'account', 'list') -AllowError -Collector 'BillingAccess'
             foreach ($account in @(Expand-FlatArray -InputObject $accounts)) {
                 $scope = Get-PropertyText -Object $account -Names @('id')
                 if (-not $scope) { continue }
@@ -915,7 +1289,7 @@ try {
         Add-CollectorStatus -Collector 'BillingAccess' -Status 'Skipped' -StartedUtc ([DateTime]::UtcNow) -RowsBefore $script:AccessRows.Count -Message 'Skipped by -SkipBilling'
     }
 
-    if (-not $SkipReservations) {
+    if ($doReservations) {
         Invoke-Collector -Name 'ReservationAccess' -Optional -ScriptBlock {
             $orders = Invoke-AzJsonWithTimeout -Arguments @('reservations', 'reservation-order', 'list') -TimeoutSeconds 90
             foreach ($order in @(Expand-FlatArray -InputObject $orders)) {
@@ -930,11 +1304,19 @@ try {
         Add-CollectorStatus -Collector 'ReservationAccess' -Status 'Skipped' -StartedUtc ([DateTime]::UtcNow) -RowsBefore $script:AccessRows.Count -Message 'Skipped by -SkipReservations'
     }
 
-    if (-not $SkipClassicAdmins) {
+    if ($doClassicAdmins) {
         Invoke-Collector -Name 'ClassicAdmins' -Optional -ScriptBlock {
+            $jobs = @($script:Subscriptions | ForEach-Object {
+                @{ Key = [string]$_.id; Arguments = @('role', 'assignment', 'list', '--include-classic-administrators', '--subscription', $_.id) }
+            })
+            $results = Invoke-AzJsonParallel -Jobs $jobs -Throttle $Parallel -TimeoutSeconds 300 -Collector 'ClassicAdmins' -OnProgress {
+                param($done, $count)
+                Write-CollectorHeartbeat -Collector 'ClassicAdmins' -Current $done -Total $count -Activity 'classic administrators'
+            }
             foreach ($sub in $script:Subscriptions) {
-                $assignments = Invoke-AzJson -Arguments @('role', 'assignment', 'list', '--include-classic-administrators', '--subscription', $sub.id) -AllowError
-                foreach ($assignment in @(Expand-FlatArray -InputObject $assignments)) {
+                $result = $results[[string]$sub.id]
+                if (-not $result -or -not $result.Ok) { continue }
+                foreach ($assignment in @(Expand-FlatArray -InputObject $result.Data)) {
                     $roleName = Get-PropertyText -Object $assignment -Names @('roleDefinitionName', 'roleName')
                     if ($roleName -notmatch '(?i)classic|administrator|co-administrator|service administrator|account administrator') { continue }
                     $row = Convert-RoleAssignmentToRow -Assignment $assignment -Collector 'ClassicAdmins' -Surface 'Classic Subscription Admins' -AccessModel 'ClassicAzureAdmin' -SubscriptionId $sub.id -SubscriptionName $sub.name
@@ -967,7 +1349,9 @@ try {
         $summaryJson = Join-Path $reportsDir ("all-azure-access-summary-{0}.json" -f $context.RunId)
 
         Export-ObjectList -Path $allAccessCsv -Columns $columns -Rows @($script:AccessRows)
-        Write-JsonFile -Path $allAccessJson -Data @($script:AccessRows) -Depth 12
+        if ($EmitJson) {
+            Write-JsonFile -Path $allAccessJson -Data @($script:AccessRows) -Depth 12
+        }
         Export-ObjectList -Path $effectiveCsv -Columns $columns -Rows @($script:EffectiveRows)
         Export-ObjectList -Path $directCsv -Columns $columns -Rows @($script:DirectRows)
         Export-ObjectList -Path $groupCsv -Columns $columns -Rows @($script:GroupRows)
@@ -980,36 +1364,7 @@ try {
         Export-ObjectList -Path $statusCsv -Columns @('collector','status','startedUtc','endedUtc','durationSeconds','rowsAdded','totalRows','message') -Rows @($script:StatusRows)
         Export-ObjectList -Path $errorsCsv -Columns @('collector','status','scope','api','errorCode','errorMessage','generatedUtc') -Rows @($script:ErrorRows)
 
-        $coverage = [ordered]@{
-            generatedUtc = Get-UtcTimestamp
-            runDir = $context.RunDir
-            subscriptionsDiscovered = $script:Subscriptions.Count
-            managementGroupsDiscovered = $script:ManagementGroups.Count
-            resourceGroupsDiscovered = $script:ResourceGroups.Count
-            resourcesDiscovered = $script:Resources.Count
-            scopesDiscovered = $script:ScopeRows.Count
-            roleDefinitionsDiscovered = $script:RoleRows.Count
-            directAssignments = $script:DirectRows.Count
-            effectiveAssignments = $script:EffectiveRows.Count
-            groupDerivedAssignments = $script:GroupRows.Count
-            servicePrincipalOwnerRows = $script:OwnerRows.Count
-            collectorFailures = @($script:StatusRows | Where-Object { $_.status -ne 'Succeeded' -and $_.status -ne 'Skipped' }).Count
-            skippedCollectors = @($script:StatusRows | Where-Object { $_.status -eq 'Skipped' }).Count
-            options = @{
-                subscriptionIds = @($SubscriptionIds)
-                managementGroupIds = @($ManagementGroupIds)
-                resourceTypes = @($ResourceTypes)
-                skipResourceLevel = [bool]$SkipResourceLevel
-                skipChildDataScopes = [bool]$SkipChildDataScopes
-                skipPim = [bool]$SkipPim
-                skipBilling = [bool]$SkipBilling
-                skipReservations = [bool]$SkipReservations
-                fullRoleDefinitionScan = [bool]$FullRoleDefinitionScan
-                skipClassicAdmins = [bool]$SkipClassicAdmins
-                noGroupExpansion = [bool]$NoGroupExpansion
-                limitResources = $LimitResources
-            }
-        }
+        $coverage = Get-CoverageSummary
         Write-JsonFile -Path $coverageJson -Data $coverage -Depth 10
 
         $node = Get-Command node -ErrorAction SilentlyContinue
@@ -1074,18 +1429,72 @@ catch {
     throw
 }
 finally {
+    $bundlePath = ''
     try {
-        Export-ObjectList -Path (Join-Path $context.OutDir 'collectorStatus.csv') -Columns @('collector','status','startedUtc','endedUtc','durationSeconds','rowsAdded','totalRows','message') -Rows @($script:StatusRows)
+        Write-DiagnosticOutputs
         Write-RunManifest -Context $context -ExitCode $exitCode -Extra @{ accessRows = $script:AccessRows.Count; statusRows = $script:StatusRows.Count }
     }
-    finally {
-        Stop-Transcript | Out-Null
+    catch {
+        Write-ScannerLine -Text ("Failed to write diagnostic outputs: {0}" -f $_.Exception.Message) -Level 'Error'
     }
+
+    $logResult = $null
+    try {
+        $logResult = Close-ScannerLog -Summary @{
+            exitCode = $exitCode
+            accessRows = $script:AccessRows.Count
+            collectors = $script:StatusRows.Count
+        }
+    }
+    catch { $logResult = $null }
+
+    $errorClasses = @()
+    try {
+        $summaryFile = Join-Path $context.LogDir 'errorSummary.json'
+        if (Test-Path -LiteralPath $summaryFile) {
+            $errorClasses = @((Get-Content -LiteralPath $summaryFile -Raw | ConvertFrom-Json).errorClasses)
+        }
+    }
+    catch { $errorClasses = @() }
+
+    # Always bundle when something went wrong - that is exactly when it is needed.
+    if ($SupportBundle -or $exitCode -ne 0) {
+        try {
+            $bundlePath = New-ScannerSupportBundle -RunDirectory $context.RunDir `
+                -DestinationPath (Join-Path $context.RunDir ("support-bundle-{0}.zip" -f $context.RunId)) -IncludeData:$IncludeData
+        }
+        catch { $bundlePath = '' }
+    }
+
+    try { Complete-ScannerUi } catch { }
+    try {
+        Write-ScannerSummary -StatusRows @($script:StatusRows) -ErrorClasses $errorClasses -Totals ([ordered]@{
+            'Access rows'   = $script:AccessRows.Count
+            'Scopes'        = $script:ScopeRows.Count
+            'Principals'    = $script:PrincipalRows.Count
+            'API calls'     = $(if ($logResult) { $logResult.ApiCalls } else { 0 })
+            'Issue classes' = @($errorClasses).Count
+        })
+    }
+    catch { }
+
+    if (-not $NoTranscript) { try { Stop-Transcript | Out-Null } catch { } }
+
+    Write-ScannerLine -Text '' -Level 'Plain'
+    if ($bundlePath) {
+        Write-ScannerLine -Text ('Support bundle (safe to send): {0}' -f $bundlePath) -Level 'Header' -Force
+    }
+    elseif (-not $SupportBundle) {
+        Write-ScannerLine -Text 'Re-run with -SupportBundle to produce a redacted diagnostics zip.' -Level 'Detail'
+    }
+
     Write-Host "RUN_DIR=$($context.RunDir)"
     Write-Host "ALL_ACCESS_CSV=$(Join-Path $context.OutDir 'allAzureAccess.csv')"
     Write-Host "COLLECTOR_STATUS=$(Join-Path $context.OutDir 'collectorStatus.csv')"
     Write-Host "RESULTS_JSON=$($context.ResultsJson)"
     Write-Host "RESULTS_ZIP=$(Join-Path $context.OutDir 'results.zip')"
+    Write-Host "EVENT_LOG=$(Join-Path $context.LogDir 'events.jsonl')"
+    Write-Host "SUPPORT_BUNDLE=$bundlePath"
     Write-Host "FINAL_STATUS=$(if ($exitCode -eq 0) { 'Succeeded' } elseif ($exitCode -eq 2) { 'CompletedWithWarnings' } else { 'Failed' })"
 }
 
