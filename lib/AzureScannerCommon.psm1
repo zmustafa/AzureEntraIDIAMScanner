@@ -695,7 +695,7 @@ function Invoke-GraphBatch {
 # ---------------------------------------------------------------------------
 function Invoke-AzJsonParallel {
     param(
-        [Parameter(Mandatory = $true)][array]$Jobs,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][array]$Jobs,
         [int]$Throttle = 4,
         [int]$TimeoutSeconds = 600,
         [string]$Collector = '',

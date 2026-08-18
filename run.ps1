@@ -49,6 +49,19 @@ Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerCommon.psm1') -Force -Di
 Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerLog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerUI.psm1') -Force -DisableNameChecking
 
+# `pwsh -File run.ps1 -SubscriptionIds a,b` passes "a,b" as a single string; split it so
+# -File and in-session invocation behave identically.
+function Split-ListArgument {
+    param([string[]]$Value)
+    $items = @($Value | ForEach-Object { ([string]$_) -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # Leading comma stops PowerShell unrolling an empty result to $null.
+    return ,$items
+}
+
+$SubscriptionIds = Split-ListArgument -Value $SubscriptionIds
+$ManagementGroupIds = Split-ListArgument -Value $ManagementGroupIds
+$ResourceTypes = Split-ListArgument -Value $ResourceTypes
+
 # -Include* forces a collector on, -Skip* forces it off, -Include* wins if both are given.
 function Resolve-CollectorToggle {
     param([bool]$Include, [bool]$Skip)
@@ -433,6 +446,8 @@ function Invoke-Collector {
     }
     catch {
         $message = $_.Exception.Message
+        $stack = [string]$_.ScriptStackTrace
+        $position = [string]$_.InvocationInfo.PositionMessage
         $status = 'Failed'
         if ($message -match '(?i)authorization|unauthori[sz]ed|forbidden|insufficient privileges|does not have authorization|authentication') { $status = 'Unauthorized' }
         elseif ($message -match '(?i)throttl|too many requests|429') { $status = 'Throttled' }
@@ -441,8 +456,8 @@ function Invoke-Collector {
         Add-CollectorStatus -Collector $Name -Status $status -StartedUtc $started -RowsBefore $rowsBefore -Message $message
         Add-ErrorRow -Collector $Name -Status $status -Message $message
         $safeName = ($Name -replace '[^A-Za-z0-9_.-]', '_')
-        Write-JsonFile -Path (Join-Path $errorsDir "$safeName.json") -Data @{ collector = $Name; status = $status; error = $message; generatedUtc = Get-UtcTimestamp }
-        Write-ScannerEvent -Level 'Error' -Collector $Name -EventName 'collector-end' -Message $message -DurationMs ([int]([DateTime]::UtcNow - $started).TotalMilliseconds) -Data @{ status = $status; rowsAdded = $added }
+        Write-JsonFile -Path (Join-Path $errorsDir "$safeName.json") -Data @{ collector = $Name; status = $status; error = $message; stackTrace = $stack; position = $position; generatedUtc = Get-UtcTimestamp }
+        Write-ScannerEvent -Level 'Error' -Collector $Name -EventName 'collector-end' -Message $message -DurationMs ([int]([DateTime]::UtcNow - $started).TotalMilliseconds) -Data @{ status = $status; rowsAdded = $added; stackTrace = $stack }
         Complete-ScannerPhase -Name $Name -Status $status -RowsAdded $added -Message $message
         if ($FailFast -or (-not $Optional -and -not $ContinueOnError)) { throw }
     }
@@ -800,7 +815,12 @@ try {
             $discovered = @($discovered | Where-Object { -not $_.tenantId -or [string]$_.tenantId -eq $script:TenantId })
         }
         $script:Subscriptions = $discovered
-        if ($script:Subscriptions.Count -eq 0) { throw 'No enabled Azure subscriptions were returned.' }
+        if ($script:Subscriptions.Count -eq 0) {
+            if ($SubscriptionIds.Count -gt 0) {
+                throw ("None of the {0} requested subscription id(s) could be resolved: {1}. Check the ids are correct and that 'az account show --subscription <id>' succeeds for each." -f $SubscriptionIds.Count, ($SubscriptionIds -join ', '))
+            }
+            throw 'No enabled Azure subscriptions were returned. Confirm az login succeeded and that the account can see at least one enabled subscription.'
+        }
         foreach ($sub in $script:Subscriptions) {
             Add-ScopeRow -Scope ("/subscriptions/{0}" -f $sub.id) -ScopeType 'subscription' -DisplayName $sub.name -SubscriptionId $sub.id -SubscriptionName $sub.name -Collector 'Subscriptions'
         }
@@ -1052,12 +1072,23 @@ try {
             $groupAssignments = @($script:DirectRows | Where-Object { $_.principalType -eq 'Group' -and $_.principalId })
             $index = 0
             $truncatedGroups = 0
+            $failedGroups = 0
             foreach ($assignmentRow in $groupAssignments) {
                 $index++
                 $groupId = [string]$assignmentRow.principalId
                 Write-CollectorHeartbeat -Collector 'GroupExpansion' -Current $index -Total $groupAssignments.Count -Activity 'expanding groups'
                 if (-not $script:GroupMembersById.ContainsKey($groupId)) {
-                    $expansion = Get-GroupMembership -GroupId $groupId -MaxDepth $MaxGroupDepth -MaxMembers $MaxGroupMembers
+                    # A single deleted or inaccessible group must not cost us every other group.
+                    try {
+                        $expansion = Get-GroupMembership -GroupId $groupId -MaxDepth $MaxGroupDepth -MaxMembers $MaxGroupMembers
+                    }
+                    catch {
+                        $script:GroupMembersById[$groupId] = @()
+                        $failedGroups++
+                        Add-ErrorRow -Collector 'GroupExpansion' -Status 'PartiallyCollected' -Scope $groupId -Api 'Graph group members' -ErrorCode 'GroupUnreadable' `
+                            -Message ("Could not expand group '{0}' ({1}): {2}" -f $assignmentRow.principalDisplayName, $groupId, $_.Exception.Message)
+                        continue
+                    }
                     $members = @($expansion.Members)
                     $script:GroupMembersById[$groupId] = $members
                     if ($expansion.Truncated) {
@@ -1102,7 +1133,8 @@ try {
             }
             Write-ScannerEvent -Level 'Info' -Collector 'GroupExpansion' -EventName 'expansion' -Data @{
                 groupAssignments = $groupAssignments.Count; distinctGroups = $script:GroupMembersById.Count
-                edges = $script:GroupExpansionRows.Count; truncatedGroups = $truncatedGroups; maxDepth = $MaxGroupDepth
+                edges = $script:GroupExpansionRows.Count; truncatedGroups = $truncatedGroups
+                unreadableGroups = $failedGroups; maxDepth = $MaxGroupDepth
             }
         }
     }
@@ -1176,9 +1208,18 @@ try {
             Write-CollectorHeartbeat -Collector 'ServicePrincipalOwners' -Current $index -Total $spIds.Count -Activity 'service principal owners'
             $sp = $script:PrincipalById[$spId]
             $spName = if ($sp) { $sp.displayName } else { $spId }
-            $owners = if ($batched -and $ownersById.ContainsKey($spId)) { @($ownersById[$spId]) }
-                      elseif ($batched) { @() }
-                      else { @(Get-GraphPagedItems -Url "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/owners?`$select=id,displayName,userPrincipalName,mail,appId&`$top=999" -Collector 'ServicePrincipalOwners') }
+            $owners = @()
+            if ($batched) {
+                if ($ownersById.ContainsKey($spId)) { $owners = @($ownersById[$spId]) }
+            }
+            else {
+                # Deleted service principals 404; skip them rather than losing the collector.
+                try { $owners = @(Get-GraphPagedItems -Url "https://graph.microsoft.com/v1.0/servicePrincipals/$spId/owners?`$select=id,displayName,userPrincipalName,mail,appId&`$top=999" -Collector 'ServicePrincipalOwners') }
+                catch {
+                    Add-ErrorRow -Collector 'ServicePrincipalOwners' -Status 'PartiallyCollected' -Scope $spId -Api 'Graph servicePrincipals/owners' -ErrorCode 'OwnersUnreadable' -Message $_.Exception.Message
+                    continue
+                }
+            }
             foreach ($owner in $owners) {
                 Add-PrincipalResolution -Principal $owner
                 $ownerId = Get-PropertyText -Object $owner -Names @('id')
