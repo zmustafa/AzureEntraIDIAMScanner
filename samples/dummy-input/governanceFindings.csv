@@ -1,0 +1,4 @@
+"tenantId","type","recordId","packageId","definitionId","instanceId","principalId","detail"
+"tenant-0000","ConfiguredPolicyWithoutReviews","policy-0002","package-0002","","","","Synthetic policy has reviewsEnabled=false."
+"tenant-0000","PartiallyDeliveredAssignment","package-assignment-0002","package-0001","","","user-0003","Synthetic package delivery is incomplete."
+"tenant-0000","DeniedDecisionNotApplied","decision-package-0001","","review-definition-package","review-instance-package","user-0002","Deny/New is not proof of revoked access."

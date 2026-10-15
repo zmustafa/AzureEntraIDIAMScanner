@@ -1,0 +1,7 @@
+"tenantId","id","definitionId","displayName","reviewType","status","startDateTime","endDateTime","scopeJson","reviewersJson","fallbackReviewersJson","errorsJson"
+"tenant-0000","review-instance-package","review-definition-package","Package January","AccessPackage","Completed","2026-01-01T00:00:00Z","2026-01-08T00:00:00Z","","[]","[]","[]"
+"tenant-0000","review-instance-group","review-definition-group","Group January","Group","InProgress","2026-01-01T00:00:00Z","2026-01-12T00:00:00Z","","","",""
+"tenant-0000","review-instance-app","review-definition-app","Application January overdue","Application","InProgress","2026-01-01T00:00:00Z","2026-01-09T00:00:00Z","","","",""
+"tenant-0000","review-instance-role","review-definition-role","Role January applied","DirectoryRole","Applied","2026-01-01T00:00:00Z","2026-01-05T00:00:00Z","","","",""
+"tenant-0000","review-instance-unknown","review-definition-unknown","Unknown review","Unknown","FutureStatus","","","","","",""
+"tenant-0000","review-instance-future","review-definition-group","Scheduled future review","Group","NotStarted","2026-01-20T00:00:00Z","2026-01-30T00:00:00Z","","","",""

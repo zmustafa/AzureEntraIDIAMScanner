@@ -25,6 +25,10 @@ Test-PowerShellParse -Path (Join-Path $root 'Run-QuickScan.ps1')
 Test-PowerShellParse -Path (Join-Path $root 'lib\AzureScannerCommon.psm1')
 Test-PowerShellParse -Path (Join-Path $root 'lib\AzureScannerLog.psm1')
 Test-PowerShellParse -Path (Join-Path $root 'lib\AzureScannerUI.psm1')
+Test-PowerShellParse -Path (Join-Path $root 'lib\AzureScannerGovernance.psm1')
+Test-PowerShellParse -Path (Join-Path $root 'tests\Test-Governance.ps1')
+
+& (Join-Path $root 'tests\Test-Governance.ps1')
 
 # Logs get emailed to support, so a token or UPN reaching disk is a release blocker.
 Import-Module (Join-Path $root 'lib\AzureScannerLog.psm1') -Force -WarningAction SilentlyContinue
@@ -61,6 +65,9 @@ if (-not $SkipNpmInstall) {
 }
 
 npm run sample
+if ($LASTEXITCODE -ne 0) { throw "Dummy sample generation failed with exit code $LASTEXITCODE." }
+node --test (Join-Path $root 'tests\report-governance.test.mjs')
+if ($LASTEXITCODE -ne 0) { throw "Governance report tests failed with exit code $LASTEXITCODE." }
 
 $sampleWorkbook = Join-Path $root 'samples\all-azure-access-sample-ALL-dummy.xlsx'
 $sampleSummary = Join-Path $root 'samples\all-azure-access-sample-ALL-dummy-summary.json'

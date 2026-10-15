@@ -209,6 +209,56 @@ Best-effort collectors include:
 
 PIM is not treated as a separate permission model. Rows are marked with assignment states such as `Eligible` so the workbook can distinguish active access from eligible/JIT access.
 
+### Access Packages and Access Reviews
+
+The scanner attempts read-only Microsoft Graph v1.0 Identity Governance collection by default:
+
+- Access package catalogs, packages, assignment policies, resource roles/scopes, and assignments.
+- Access review definitions for packages, groups, enterprise applications, and Entra privileged roles, including unrecognized scopes without discarding them.
+- Review instances, multi-stage history, decisions, recommendations, reviewer justifications, and decision application results.
+
+All visible review definitions are inventoried. Instance/decision history includes active and other non-completed reviews regardless of age, plus completed reviews ending within the last 90 days. `-AccessReviewLookbackDays 0` requests all available history. The cutoff is inclusive and recorded in coverage metadata.
+
+Governance records are separate from the existing access-assignment tables and do not increase their totals. A delivered package assignment is provisioning evidence, not proof of every underlying permission. A denied review decision is not proof of revoked access: `decision` and `applyResult` are reported separately. Stage history is retained but excluded from final instance-decision totals.
+
+`Governance Access Links` correlates delivered package assignments with configured group Member roles and already observed active group-derived access using directory object IDs. It does not infer access from group ownership, expand partially delivered assignments into active permissions, or claim that a package is the exclusive cause of access. External subjects without directory object IDs remain reportable without invented principal IDs.
+
+Each dataset has a CSV export, plus a matching JSON array with `-EmitJson`:
+
+```text
+accessCatalogs
+accessPackages
+accessPackagePolicies
+accessPackageResources
+accessPackageAssignments
+accessReviewDefinitions
+accessReviewInstances
+accessReviewStages
+accessReviewDecisions
+governanceAccessLinks
+governanceFindings
+```
+
+Coverage includes complete source row counts, dataset collector statuses, the history window, and excluded-instance counts. Workbook row limits are disclosed separately; aggregate breakdowns based on truncated or incompletely collected data are not presented as complete. Successful empty collection, disabled collection, and permission failures are distinct. Visibility is limited to the authenticated caller; tenant-wide completeness is not assumed.
+
+#### Governance Authentication
+
+Required Graph read permissions are `EntitlementManagement.Read.All` and `AccessReview.Read.All`, or only the corresponding permission when one feature is disabled. Delegated callers also need the endpoint-specific Entra/catalog roles. Catalog-scoped package queries are supported. Tenant licensing and consent determine which features are available; P2 alone does not guarantee every advanced governance capability.
+
+The existing Azure CLI session is used by default. Its Graph token might not have governance permissions even if the user is an administrator. Such failures are reported as coverage failures, not empty success. To explicitly use Microsoft Graph PowerShell for governance reads:
+
+```powershell
+Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+Connect-MgGraph -TenantId <tenant-id> -Scopes EntitlementManagement.Read.All,AccessReview.Read.All -ContextScope Process
+.\run.ps1 -SubscriptionIds <subscription-id> -GovernanceOnly -GraphAuthMode GraphPowerShell -EmitJson -ContinueOnError
+```
+
+The scanner can initiate delegated sign-in when `-GraphAuthMode GraphPowerShell` is explicitly selected. `-GraphClientId` selects a custom delegated application. An existing app-only Graph context with the required read permissions is also supported, allowing certificate authentication configured outside the scanner. The scanner never creates app registrations, grants permissions, changes packages/reviews, or stores credentials. Other legacy Graph discovery continues using Azure CLI. `-NoHttp` selects the CLI fallback for Azure CLI-backed calls; explicitly selected Graph PowerShell governance reads still use the Graph SDK.
+
+The first explicitly selected subscription establishes the scan's Graph tenant. A mismatched existing Graph PowerShell tenant context is rejected. **Subscription filters constrain ARM discovery, not tenant-scoped governance reads.**
+
+Reviewer justifications and real governance exports are sensitive. They are not emitted in routine logs or included in the default support bundle. Complete package request/approval transaction history and additional PIM assignment surfaces are not included in this extension.
+
 ### Billing, Reservations, and Cost-Adjacent Access
 
 Billing and reservation APIs often require separate permissions. These collectors are best-effort and record status rather than blocking the run.
@@ -359,6 +409,17 @@ Sheets include:
 - PIM
 - Billing Reservations
 - Classic Admins
+- Access Catalogs
+- Access Packages
+- Package Policies
+- Package Resources
+- Package Assignments
+- Review Definitions
+- Review Instances
+- Review Stages
+- Review Decisions
+- Governance Access Links
+- Governance Findings
 - Role Definitions
 - Principal Directory
 - Errors Warnings
@@ -476,6 +537,31 @@ Skip storage child-scope discovery such as blob containers and file shares.
 -SkipPim
 ```
 Skip PIM eligibility collectors.
+
+```powershell
+-IncludeAccessPackages
+-SkipAccessPackages
+-IncludeAccessReviews
+-SkipAccessReviews
+```
+Enable/disable governance collection independently. Both features default on; explicit `-Include*` wins over `-Skip*`.
+
+```powershell
+-AccessReviewLookbackDays 90
+```
+Completed-review history window in days, inclusive of the UTC cutoff. `0` means all available history. Active reviews are retained regardless of age.
+
+```powershell
+-GovernanceOnly
+```
+Run subscription/context validation, governance collectors, and reporting without legacy access discovery. Existing access sheets remain present but empty.
+
+```powershell
+-GraphAuthMode AzureCli
+-GraphAuthMode GraphPowerShell
+-GraphClientId <application-id>
+```
+Choose governance authentication explicitly. `AzureCli` is the default. `GraphPowerShell` requires the optional `Microsoft.Graph.Authentication` module and a matching tenant context. The custom client ID is used when initiating delegated Graph sign-in.
 
 ```powershell
 -SkipBilling
@@ -670,7 +756,17 @@ cd AzureEntraIDIAMScanner
 npm run validate
 ```
 
-The validation script parses every PowerShell file, verifies that no tokens, user principal names, GUIDs, or resource names can leak into a shareable log file, installs npm dependencies when needed, regenerates the dummy sample workbook, and verifies the sample summary contains rows. It needs no Azure connection.
+The validation script parses the scanner/modules and collector tests, runs synthetic governance/transport assertions, verifies log redaction, regenerates the dummy sample workbook, and runs Node workbook regression tests. It needs no Azure connection. Use `.\Test-Package.ps1 -SkipNpmInstall` when dependencies are already restored.
+
+Focused governance checks:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-Governance.ps1
+pwsh -NoProfile -File .\tests\Test-Governance.ps1
+node --test .\tests\report-governance.test.mjs
+```
+
+Synthetic tests cover lifecycle states, external identities, stage/final decision separation, the exact history cutoff, parent/page failures, strict HTTP/CLI errors, expanded paging, correlation deduplication, CSV/JSON shapes, empty/unauthorized reporting, and workbook truncation. Live integration testing uses an owner-authorized tenant with isolated fixtures and separate setup/cleanup; real environment details and outputs stay outside the repository.
 
 ## Sample Workbook With Dummy Data
 

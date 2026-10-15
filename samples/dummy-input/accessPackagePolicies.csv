@@ -1,0 +1,4 @@
+"tenantId","id","packageId","displayName","description","allowedTargetScope","approvalRequired","expirationType","expirationDuration","expirationEndDateTime","reviewsEnabled","reviewSettingsJson","requestApprovalSettingsJson","requestorSettingsJson","automaticRequestSettingsJson","specificAllowedTargetsJson","createdDateTime","modifiedDateTime"
+"tenant-0000","policy-0001","package-0001","Quarterly review required","","allMemberUsers","True","afterDuration","P90D","","True","{""isEnabled"":true,""recurrenceType"":""quarterly""}","{""isApprovalRequired"":true}","{""scopeType"":""AllExistingDirectoryMemberUsers""}","{}","[]","",""
+"tenant-0000","policy-0002","package-0002","No configured reviews","","allExternalUsers","True","afterDuration","P30D","","False","{""isEnabled"":false}","","","","","",""
+"tenant-0000","policy-0003","package-0002","Review setting unavailable","","","","","","","","{}","","","","","",""
