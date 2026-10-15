@@ -1,0 +1,2 @@
+"tenantId","packageId","id","resourceId","resourceOriginId","originSystem","resourceDisplayName","roleId","roleOriginId","roleDisplayName","scopeId","scopeOriginId","scopeDisplayName"
+"tenant-0000","package-0001","package-role-scope-0001","package-resource-0001","group-0001","AadGroup","Platform Operators","package-role-0001","Member_group-0001","Member","package-scope-0001","group-0001","Platform Operators"

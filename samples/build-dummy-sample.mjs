@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { governanceDatasets } from "../report.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -188,6 +189,71 @@ const errorRows = [
   { collector: "PartnerWorkloadAccess", status: "Unauthorized", scope: "partner-center", api: "dummy optional api", errorCode: "DummyUnauthorized", errorMessage: "Synthetic example only. No real API was called.", generatedUtc: "2026-01-10T00:00:11Z" },
 ];
 
+const governanceRows = {
+  accessCatalogs: [
+    { id: "catalog-0001", displayName: "Example workforce catalog", description: "Synthetic governance catalog", state: "published", isExternallyVisible: "True", createdDateTime: "2026-01-01T00:00:00Z", modifiedDateTime: "2026-01-02T00:00:00Z" },
+  ],
+  accessPackages: [
+    { id: "package-0001", catalogId: "catalog-0001", displayName: "Example platform onboarding", description: "Synthetic group membership package", isHidden: "False", createdDateTime: "2026-01-01T00:00:00Z" },
+    { id: "package-0002", catalogId: "catalog-0001", displayName: "Example external collaboration", description: "Synthetic external assignments only", isHidden: "False" },
+  ],
+  accessPackagePolicies: [
+    { id: "policy-0001", packageId: "package-0001", displayName: "Quarterly review required", allowedTargetScope: "allMemberUsers", approvalRequired: "True", expirationType: "afterDuration", expirationDuration: "P90D", reviewsEnabled: "True", reviewSettingsJson: JSON.stringify({ isEnabled: true, recurrenceType: "quarterly" }), requestApprovalSettingsJson: JSON.stringify({ isApprovalRequired: true }), requestorSettingsJson: JSON.stringify({ scopeType: "AllExistingDirectoryMemberUsers" }), automaticRequestSettingsJson: "{}", specificAllowedTargetsJson: "[]" },
+    { id: "policy-0002", packageId: "package-0002", displayName: "No configured reviews", allowedTargetScope: "allExternalUsers", approvalRequired: "True", expirationType: "afterDuration", expirationDuration: "P30D", reviewsEnabled: "False", reviewSettingsJson: JSON.stringify({ isEnabled: false }) },
+    { id: "policy-0003", packageId: "package-0002", displayName: "Review setting unavailable", reviewsEnabled: "", reviewSettingsJson: "{}" },
+  ],
+  accessPackageResources: [
+    { packageId: "package-0001", id: "package-role-scope-0001", resourceId: "package-resource-0001", resourceOriginId: "group-0001", originSystem: "AadGroup", resourceDisplayName: "Platform Operators", roleId: "package-role-0001", roleOriginId: "Member_group-0001", roleDisplayName: "Member", scopeId: "package-scope-0001", scopeOriginId: "group-0001", scopeDisplayName: "Platform Operators" },
+  ],
+  accessPackageAssignments: [
+    { id: "package-assignment-0001", packageId: "package-0001", policyId: "policy-0001", subjectId: "subject-0002", principalId: "user-0002", principalType: "User", principalDisplayName: "Riley Operator", principalName: "riley.operator@example.invalid", email: "riley.operator@example.invalid", state: "delivered", status: "Delivered", startDateTime: "2026-01-01T00:00:00Z", expirationType: "afterDuration", expirationDuration: "P90D", endDateTime: "2026-04-01T00:00:00Z" },
+    { id: "package-assignment-0002", packageId: "package-0001", policyId: "policy-0001", subjectId: "subject-0003", principalId: "user-0003", principalType: "User", principalDisplayName: "Morgan Storage", principalName: "morgan.storage@example.invalid", state: "partiallyDelivered", status: "DeliveryFailed", startDateTime: "2026-01-02T00:00:00Z" },
+    { id: "package-assignment-0003", packageId: "package-0001", policyId: "policy-0001", subjectId: "subject-0004", principalId: "user-0004", principalType: "User", principalDisplayName: "Finley Finance", principalName: "finley.finance@example.invalid", state: "expired", status: "Expired", startDateTime: "2025-10-01T00:00:00Z", endDateTime: "2026-01-01T00:00:00Z", expiredDateTime: "2026-01-01T00:00:00Z" },
+    // An external entitlement subject need not have a directory object ID.
+    { id: "package-assignment-0004", packageId: "package-0002", policyId: "policy-0002", subjectId: "external-subject-0001", principalId: "", principalType: "ExternalUser", principalDisplayName: "Example External Collaborator", principalName: "external.collaborator@example.invalid", email: "external.collaborator@example.invalid", state: "delivered", status: "Delivered", startDateTime: "2026-01-03T00:00:00Z" },
+  ],
+  accessReviewDefinitions: [
+    { id: "review-definition-package", displayName: "Package access certification", reviewType: "AccessPackage", status: "Completed", scopeJson: JSON.stringify({ accessPackageId: "package-0001" }), settingsJson: JSON.stringify({ autoApplyDecisionsEnabled: false }), reviewersJson: JSON.stringify([{ id: "user-0001" }]), fallbackReviewersJson: "[]", stageSettingsJson: JSON.stringify([{ stageId: "review-stage-0001" }, { stageId: "review-stage-0002" }]), createdDateTime: "2026-01-01T00:00:00Z" },
+    { id: "review-definition-group", displayName: "Platform Operators membership", reviewType: "Group", status: "InProgress", scopeJson: JSON.stringify({ query: "/groups/group-0001/transitiveMembers", queryType: "MicrosoftGraph" }), settingsJson: "{}", reviewersJson: "[]", fallbackReviewersJson: "[]" },
+    { id: "review-definition-app", displayName: "Example application access", reviewType: "Application", status: "InProgress", scopeJson: JSON.stringify({ query: "/servicePrincipals/spn-0001/appRoleAssignedTo" }), settingsJson: "{}" },
+    { id: "review-definition-role", displayName: "Directory role certification", reviewType: "DirectoryRole", status: "Applied", scopeJson: JSON.stringify({ query: "/roleManagement/directory/roleAssignmentScheduleInstances" }), settingsJson: "{}" },
+    { id: "review-definition-unknown", displayName: "Unrecognized synthetic scope", reviewType: "Unknown", status: "FutureStatus", scopeJson: JSON.stringify({ query: "/syntheticFutureScope" }), instanceEnumerationScopeJson: "{}" },
+  ],
+  accessReviewInstances: [
+    { id: "review-instance-package", definitionId: "review-definition-package", displayName: "Package January", reviewType: "AccessPackage", status: "Completed", startDateTime: "2026-01-01T00:00:00Z", endDateTime: "2026-01-08T00:00:00Z", reviewersJson: "[]", fallbackReviewersJson: "[]", errorsJson: "[]" },
+    { id: "review-instance-group", definitionId: "review-definition-group", displayName: "Group January", reviewType: "Group", status: "InProgress", startDateTime: "2026-01-01T00:00:00Z", endDateTime: "2026-01-12T00:00:00Z" },
+    { id: "review-instance-app", definitionId: "review-definition-app", displayName: "Application January overdue", reviewType: "Application", status: "InProgress", startDateTime: "2026-01-01T00:00:00Z", endDateTime: "2026-01-09T00:00:00Z" },
+    { id: "review-instance-role", definitionId: "review-definition-role", displayName: "Role January applied", reviewType: "DirectoryRole", status: "Applied", startDateTime: "2026-01-01T00:00:00Z", endDateTime: "2026-01-05T00:00:00Z" },
+    { id: "review-instance-unknown", definitionId: "review-definition-unknown", displayName: "Unknown review", reviewType: "Unknown", status: "FutureStatus", startDateTime: "", endDateTime: "" },
+    { id: "review-instance-future", definitionId: "review-definition-group", displayName: "Scheduled future review", reviewType: "Group", status: "NotStarted", startDateTime: "2026-01-20T00:00:00Z", endDateTime: "2026-01-30T00:00:00Z" },
+  ],
+  accessReviewStages: [
+    { id: "review-stage-0001", definitionId: "review-definition-package", instanceId: "review-instance-package", status: "Completed", startDateTime: "2026-01-01T00:00:00Z", endDateTime: "2026-01-03T00:00:00Z", reviewersJson: JSON.stringify([{ id: "user-0001" }]), fallbackReviewersJson: "[]" },
+    { id: "review-stage-0002", definitionId: "review-definition-package", instanceId: "review-instance-package", status: "Completed", startDateTime: "2026-01-03T00:00:00Z", endDateTime: "2026-01-08T00:00:00Z", reviewersJson: JSON.stringify([{ id: "user-0005" }]), fallbackReviewersJson: "[]" },
+  ],
+  accessReviewDecisions: [
+    { id: "decision-package-0001", definitionId: "review-definition-package", instanceId: "review-instance-package", decisionLevel: "Instance", reviewType: "AccessPackage", principalId: "user-0002", principalDisplayName: "Riley Operator", principalType: "User", resourceId: "package-0001", resourceDisplayName: "Example platform onboarding", resourceType: "AccessPackage", decision: "Deny", recommendation: "Deny", justification: "Synthetic reviewer note,\nnot an access revocation confirmation.", reviewedById: "user-0005", reviewedByName: "Taylor TenantAdmin", reviewedDateTime: "2026-01-08T00:00:00Z", applyResult: "New", principalLink: "https://example.invalid/principals/user-0002", resourceLink: "https://example.invalid/packages/package-0001", permissionJson: "{}" },
+    { id: "decision-package-0001", definitionId: "review-definition-package", instanceId: "review-instance-package", stageId: "review-stage-0001", decisionLevel: "Stage", reviewType: "AccessPackage", principalId: "user-0002", decision: "Approve", recommendation: "Approve", applyResult: "New" },
+    { id: "decision-package-0001", definitionId: "review-definition-package", instanceId: "review-instance-package", stageId: "review-stage-0002", decisionLevel: "Stage", reviewType: "AccessPackage", principalId: "user-0002", decision: "Deny", recommendation: "Deny", applyResult: "New" },
+    { id: "decision-group-0001", definitionId: "review-definition-group", instanceId: "review-instance-group", decisionLevel: "Instance", reviewType: "Group", principalId: "user-0003", principalDisplayName: "Morgan Storage", principalType: "User", resourceId: "group-0001", resourceDisplayName: "Platform Operators", resourceType: "Group", decision: "Deny", recommendation: "Deny", applyResult: "AppliedSuccessfully", appliedById: "user-0001", appliedDateTime: "2026-01-09T00:00:00Z" },
+    { id: "decision-group-0002", definitionId: "review-definition-group", instanceId: "review-instance-group", decisionLevel: "Instance", reviewType: "Group", principalId: "user-0004", principalType: "User", resourceId: "group-0001", decision: "Deny", applyResult: "AppliedWithUnknownFailure", applyDescription: "Synthetic application failure" },
+    { id: "decision-app-0001", definitionId: "review-definition-app", instanceId: "review-instance-app", decisionLevel: "Instance", reviewType: "Application", principalId: "user-0007", principalType: "User", resourceId: "spn-0001", resourceType: "Application", decision: "NotReviewed", recommendation: "Approve", applyResult: "New" },
+    { id: "decision-role-0001", definitionId: "review-definition-role", instanceId: "review-instance-role", decisionLevel: "Instance", reviewType: "DirectoryRole", principalId: "user-0005", principalType: "User", resourceId: "entra-role-global-admin", resourceType: "DirectoryRole", decision: "Approve", recommendation: "Approve", applyResult: "AppliedSuccessfully" },
+    { id: "decision-external-0001", definitionId: "review-definition-unknown", instanceId: "review-instance-unknown", decisionLevel: "Instance", reviewType: "Unknown", principalId: "", principalDisplayName: "Example External Collaborator", principalType: "ExternalUser", decision: "FutureDecision", applyResult: "FutureApplicationResult", permissionJson: JSON.stringify({ subject: { id: "external-subject-0001", objectId: "", email: "external.collaborator@example.invalid" } }) },
+  ],
+  governanceAccessLinks: [
+    { assignmentId: "package-assignment-0001", packageId: "package-0001", principalId: "user-0002", resourceOriginId: "group-0001", accessAssignmentId: "ra-0002", accessCollector: "GroupExpansion", scope: "/subscriptions/sub-0001/resourceGroups/rg-app", roleName: "Contributor", accessPath: "GroupTransitive", evidence: "Synthetic matching group membership; linkage is evidence, not an additional access assignment." },
+  ],
+  governanceFindings: [
+    { type: "ConfiguredPolicyWithoutReviews", recordId: "policy-0002", packageId: "package-0002", detail: "Synthetic policy has reviewsEnabled=false." },
+    { type: "PartiallyDeliveredAssignment", recordId: "package-assignment-0002", packageId: "package-0001", principalId: "user-0003", detail: "Synthetic package delivery is incomplete." },
+    { type: "DeniedDecisionNotApplied", recordId: "decision-package-0001", definitionId: "review-definition-package", instanceId: "review-instance-package", principalId: "user-0002", detail: "Deny/New is not proof of revoked access." },
+  ],
+};
+for (const rows of Object.values(governanceRows)) {
+  for (const item of rows) item.tenantId = "tenant-0000";
+}
+
 const coverage = {
   generatedUtc: "2026-01-10T00:00:12Z",
   runDir: "samples/dummy-input",
@@ -208,6 +274,20 @@ const coverage = {
     skipReservations: false,
     fullRoleDefinitionScan: true,
     note: "Synthetic sample only. No real tenant data.",
+  },
+  governance: {
+    enabledPackages: true,
+    enabledReviews: true,
+    lookbackDays: 0,
+    cutoffUtc: null,
+    generatedUtc: "2026-01-10T00:00:12Z",
+    tenantId: "tenant-0000",
+    totals: Object.fromEntries(governanceDatasets.map(({ basename }) => [basename, governanceRows[basename].length])),
+    statuses: [
+      { collector: "AccessPackages", status: "Succeeded", rowsAdded: governanceRows.accessPackages.length, message: "Synthetic package collection" },
+      { collector: "AccessReviewDecisions", status: "PartiallyCollected", rowsAdded: governanceRows.accessReviewDecisions.length, message: "Synthetic example: one review scope could not be read." },
+      { collector: "AccessReviewStageReviewers", status: "Unauthorized", rowsAdded: 0, message: "Synthetic optional reviewer endpoint denied; no real API was called." },
+    ],
   },
 };
 
@@ -235,6 +315,9 @@ writeCsv("roleDefinitions.csv", ["roleName", "roleDefinitionId", "roleDefinition
 writeCsv("principalResolution.csv", ["principalId", "principalType", "displayName", "userPrincipalName", "appId", "accountEnabled", "source"], principalRows);
 writeCsv("groupExpansion.csv", ["sourceGroupId", "sourceGroupName", "memberId", "memberType", "memberDisplayName", "memberUserPrincipalName", "memberAppId", "accessPath"], groupExpansionRows);
 writeCsv("errorsWarnings.csv", ["collector", "status", "scope", "api", "errorCode", "errorMessage", "generatedUtc"], errorRows);
+for (const dataset of governanceDatasets) {
+  writeCsv(`${dataset.basename}.csv`, dataset.columns, governanceRows[dataset.basename]);
+}
 fs.writeFileSync(path.join(inputDir, "coverageSummary.json"), `${JSON.stringify(coverage, null, 2)}\n`, "utf8");
 
 const args = [
@@ -251,6 +334,7 @@ const args = [
   "--principal-resolution-csv", `${relativeInputDir}/principalResolution.csv`,
   "--errors-csv", `${relativeInputDir}/errorsWarnings.csv`,
   "--coverage-json", `${relativeInputDir}/coverageSummary.json`,
+  "--governance-dir", relativeInputDir,
   "--output", relativeWorkbook,
   "--summary-json", relativeSummary,
 ];

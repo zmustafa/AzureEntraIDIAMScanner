@@ -292,3 +292,53 @@ Default behavior implies `-ContinueOnError`.
 12. Billing, reservations, cost, classic admins.
 13. Excel workbook and pivots.
 14. Final ZIP, summary JSON, console summary.
+
+## Identity Governance Reporting Extension
+
+### Agreed Scope
+
+- Inventory access package catalogs, packages, assignment policies, resource roles/scopes, and assignments using Microsoft Graph v1.0.
+- Report all supported Graph access review types: access packages, groups, enterprise applications, and Entra privileged roles.
+- Inventory all visible review definitions. Include active reviews regardless of age and completed reviews from the last 90 days by default, with an option for all available history.
+- Collect review instances, multi-stage details, decisions, recommendations, and decision application outcomes.
+- Keep package configuration, assignment delivery, observed access, review decisions, and decision application results distinct. Governance records must not inflate existing effective-access totals.
+- Produce dedicated workbook sheets, CSV exports, optional JSON, executive summaries, coverage metadata, and evidence-backed links to existing access records.
+- Defer complete package request/approval transaction history and additional PIM assignment surfaces outside this extension.
+
+### Delivery Sequence
+
+1. Validate authentication and Graph transport, then deliver package collection, reporting, synthetic tests, and documentation end to end.
+2. Deliver review definitions, instances, stages, decisions, history filtering, reporting, and tests end to end.
+3. Add correlation and governance findings, validate compatibility and scale, and complete live integration testing.
+
+Reuse the existing collector, logging, and reporting patterns. Add dataset-specific collector counts, explicit failures in both HTTP and CLI paths, reliable pagination, and partial-collection reporting. Preserve the Azure CLI authentication path and provide an explicit delegated Graph sign-in option when needed for governance read permissions. Verify the Graph and Azure tenant contexts match.
+
+### Authorized Live Integration Environment
+
+The repository owner has designated a subscription and its associated tenant as the live integration test environment and reports that Entra ID P2 licenses are available. The owner has authorized testing in this environment. Keep its actual names, tenant/subscription IDs, identities, and results in local test configuration outside the repository.
+
+Before any live test:
+
+- Resolve and verify the exact subscription and tenant; never assume the current Azure CLI default is the designated environment.
+- Verify the required Graph consent, endpoint-specific directory/catalog roles, and feature-specific licensing. P2 availability alone is not proof that every Entitlement Management or advanced access review feature is enabled.
+- Confirm the scope of tenant-wide Graph reads. An Azure subscription filter limits ARM collection, not the tenant's governance APIs.
+- Keep the scanner read-only. Any fixture setup, decision submission/application, or cleanup is a separate, explicitly scoped test operation, not scanner functionality.
+- Use dedicated test catalogs, packages, groups, applications, and principals where fixture creation is needed. Record created object IDs and clean up only those objects; do not alter existing access, privileged assignments, or production review decisions.
+
+Live test coverage:
+
+- Validate package catalogs, policies, resource role mappings, assignments, external subjects where available, and assignment delivery states against the Entra portal.
+- Validate each supported review type, recurring instances, multi-stage reviews, reviewer decisions, and decision application results where licensed and permitted.
+- Verify that a denied decision awaiting application is not reported as revoked access, and that an expired package assignment is not treated as proof that independent access was removed.
+- Validate package-to-group-to-observed-access correlation without double-counting a principal's entitlement when multiple packages provide the same resource.
+- Compare CSV, optional JSON, workbook sheets, summaries, collector status, and coverage against known fixtures or existing read-only evidence.
+- Record commands, timestamps, expected/actual results, licensing/permission limitations, and fixture cleanup locally. Keep real scan data and reviewer justifications out of the repository and default support bundles.
+
+### Release Acceptance
+
+- Run existing package validation and targeted synthetic assertions on supported Windows PowerShell versions.
+- Test pagination, throttling, partial failures, HTTP/CLI error handling, external identities, unknown states/scopes, deduplication, and empty-versus-unauthorized results without relying on live faults.
+- Test the exact 90-day boundary and old-but-active reviews with a controlled clock and synthetic dates; supplement with available live history.
+- Verify final review totals do not double-count stage decisions, and workbook truncation is disclosed without truncating complete CSV exports.
+- Preserve existing reports when governance inputs are absent or collection is disabled.
+- Complete and record the live test matrix in the designated environment. Explicitly document unavailable scenarios rather than claiming untested coverage.

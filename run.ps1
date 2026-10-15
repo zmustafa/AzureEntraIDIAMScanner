@@ -11,6 +11,14 @@ param(
     [switch]$SkipChildDataScopes,
     [switch]$IncludePim,
     [switch]$SkipPim,
+    [switch]$IncludeAccessPackages,
+    [switch]$SkipAccessPackages,
+    [switch]$IncludeAccessReviews,
+    [switch]$SkipAccessReviews,
+    [ValidateRange(0, 36500)][int]$AccessReviewLookbackDays = 90,
+    [ValidateSet('AzureCli','GraphPowerShell')][string]$GraphAuthMode = 'AzureCli',
+    [string]$GraphClientId = '',
+    [switch]$GovernanceOnly,
     [switch]$IncludeBilling,
     [switch]$SkipBilling,
     [switch]$IncludeReservations,
@@ -48,6 +56,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerCommon.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerLog.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerUI.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'lib\AzureScannerGovernance.psm1') -Force -DisableNameChecking
 
 # `pwsh -File run.ps1 -SubscriptionIds a,b` passes "a,b" as a single string; split it so
 # -File and in-session invocation behave identically.
@@ -73,6 +82,8 @@ function Resolve-CollectorToggle {
 $doResourceLevel = Resolve-CollectorToggle -Include $IncludeResourceLevel -Skip $SkipResourceLevel
 $doChildDataScopes = Resolve-CollectorToggle -Include $IncludeChildDataScopes -Skip $SkipChildDataScopes
 $doPim = Resolve-CollectorToggle -Include $IncludePim -Skip $SkipPim
+$doAccessPackages = Resolve-CollectorToggle -Include $IncludeAccessPackages -Skip $SkipAccessPackages
+$doAccessReviews = Resolve-CollectorToggle -Include $IncludeAccessReviews -Skip $SkipAccessReviews
 $doBilling = Resolve-CollectorToggle -Include $IncludeBilling -Skip $SkipBilling
 $doReservations = Resolve-CollectorToggle -Include $IncludeReservations -Skip $SkipReservations
 $doClassicAdmins = Resolve-CollectorToggle -Include $IncludeClassicAdmins -Skip $SkipClassicAdmins
@@ -359,6 +370,9 @@ $plannedCollectors = @(
 if ($doResourceLevel) { $plannedCollectors += 'AzureResourceRbac' }
 if ($doChildDataScopes) { $plannedCollectors += 'StorageChildScopeRbac' }
 $plannedCollectors += 'EntraRoleAssignments'
+if ($doAccessPackages -or $doAccessReviews) { $plannedCollectors += 'GovernanceAuthentication' }
+if ($doAccessPackages) { $plannedCollectors += @('AccessPackageCatalogs','AccessPackages','AccessPackagePolicies','AccessPackageResources','AccessPackageAssignments') }
+if ($doAccessReviews) { $plannedCollectors += @('AccessReviewDefinitions','AccessReviewInstances','AccessReviewStages','AccessReviewDecisions') }
 if ($doGroupExpansion) { $plannedCollectors += 'GroupExpansion' }
 $plannedCollectors += @('PrincipalResolution', 'ServicePrincipalOwners')
 if ($doKeyVaultAccessPolicies) { $plannedCollectors += 'KeyVaultAccessPolicies' }
@@ -367,6 +381,9 @@ if ($doBilling) { $plannedCollectors += 'BillingAccess' }
 if ($doReservations) { $plannedCollectors += 'ReservationAccess' }
 if ($doClassicAdmins) { $plannedCollectors += 'ClassicAdmins' }
 $plannedCollectors += 'WorkbookReport'
+if ($GovernanceOnly) {
+    $plannedCollectors = @($plannedCollectors | Where-Object { $_ -in @('StartupValidation','Subscriptions','GovernanceAuthentication','WorkbookReport') -or $_ -like 'AccessPackage*' -or $_ -like 'AccessReview*' })
+}
 
 Initialize-ScannerLog -LogDirectory $context.LogDir -LogLevel $LogLevel -RedactOnDisk:$RedactLogs -MaxLogMegabytes $MaxLogMegabytes | Out-Null
 Initialize-ScannerUi -Quiet:$Quiet -NoColor:$NoColor -NoProgress:$NoProgress `
@@ -400,6 +417,7 @@ $script:UnreachableSubscriptions = @{}
 $script:LastHeartbeat = $null
 $script:HttpReady = $false
 $script:TenantId = ''
+$script:Governance = New-GovernanceState -TenantId 'NotInitialized' -IncludePackages $doAccessPackages -IncludeReviews $doAccessReviews -LookbackDays $AccessReviewLookbackDays
 
 function Add-ErrorRow {
     param([string]$Collector, [string]$Status, [string]$Message, [string]$Scope = '', [string]$Api = '', [string]$ErrorCode = '')
@@ -433,6 +451,10 @@ function Add-CollectorStatus {
 
 function Invoke-Collector {
     param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock, [switch]$Optional)
+    if ($GovernanceOnly -and $Name -notin @('StartupValidation','Subscriptions','GovernanceAuthentication','WorkbookReport')) {
+        Add-CollectorStatus -Collector $Name -Status 'Skipped' -StartedUtc ([DateTime]::UtcNow) -RowsBefore $script:AccessRows.Count -Message 'Skipped by -GovernanceOnly'
+        return
+    }
     $started = [DateTime]::UtcNow
     $rowsBefore = $script:AccessRows.Count
     Start-ScannerPhase -Name $Name
@@ -714,6 +736,7 @@ function Get-CoverageSummary {
         servicePrincipalOwnerRows = $script:OwnerRows.Count
         collectorFailures = @($script:StatusRows | Where-Object { $_.status -ne 'Succeeded' -and $_.status -ne 'Skipped' }).Count
         skippedCollectors = @($script:StatusRows | Where-Object { $_.status -eq 'Skipped' }).Count
+        governance = Get-GovernanceCoverage -State $script:Governance
         options = @{
             subscriptionIds = @($SubscriptionIds)
             managementGroupIds = @($ManagementGroupIds)
@@ -721,6 +744,11 @@ function Get-CoverageSummary {
             resourceLevel = $doResourceLevel
             childDataScopes = $doChildDataScopes
             pim = $doPim
+            accessPackages = $doAccessPackages
+            accessReviews = $doAccessReviews
+            accessReviewLookbackDays = $AccessReviewLookbackDays
+            graphAuthMode = $GraphAuthMode
+            governanceOnly = [bool]$GovernanceOnly
             billing = $doBilling
             reservations = $doReservations
             classicAdmins = $doClassicAdmins
@@ -754,6 +782,7 @@ function Write-DiagnosticOutputs {
         groupExpansionRows = $script:GroupExpansionRows.Count
         roleRows = $script:RoleRows.Count
         scopeRows = $script:ScopeRows.Count
+        governance = (Get-GovernanceCoverage -State $script:Governance).totals
         errorRows = $script:ErrorRows.Count
     }) -Depth 4
 }
@@ -774,6 +803,8 @@ Write-JsonFile -Path (Join-Path $context.LogDir 'parameters.json') -Data ([order
     effective = [ordered]@{
         subscriptionIds = @($SubscriptionIds); managementGroupIds = @($ManagementGroupIds); resourceTypes = @($ResourceTypes)
         resourceLevel = $doResourceLevel; childDataScopes = $doChildDataScopes; pim = $doPim; billing = $doBilling
+        accessPackages = $doAccessPackages; accessReviews = $doAccessReviews; accessReviewLookbackDays = $AccessReviewLookbackDays
+        graphAuthMode = $GraphAuthMode; governanceOnly = [bool]$GovernanceOnly
         reservations = $doReservations; classicAdmins = $doClassicAdmins; keyVaultAccessPolicies = $doKeyVaultAccessPolicies
         groupExpansion = $doGroupExpansion; maxGroupDepth = $MaxGroupDepth; maxGroupMembers = $MaxGroupMembers
         parallel = $Parallel; limitResources = $LimitResources; deepScopeScan = [bool]$DeepScopeScan
@@ -785,9 +816,13 @@ Write-JsonFile -Path (Join-Path $context.LogDir 'parameters.json') -Data ([order
 try {
     Invoke-Collector -Name 'StartupValidation' -ScriptBlock {
         Resolve-AzCommand | Out-Null
-        $account = Invoke-AzJson -Arguments @('account', 'show') -AllowError -Collector 'StartupValidation'
+        $accountArguments = @('account', 'show')
+        if ($SubscriptionIds.Count -gt 0) { $accountArguments += @('--subscription', $SubscriptionIds[0]) }
+        $account = Invoke-AzJson -Arguments $accountArguments -Collector 'StartupValidation'
         if (-not $account) { throw 'Azure CLI is not logged in or account show returned no data.' }
         $script:TenantId = Get-PropertyText -Object $account -Names @('tenantId')
+        Set-ScannerGraphTenant -TenantId $script:TenantId -SubscriptionId ([string]$account.id)
+        $script:Governance = New-GovernanceState -TenantId $script:TenantId -IncludePackages $doAccessPackages -IncludeReviews $doAccessReviews -LookbackDays $AccessReviewLookbackDays
         Add-ScopeRow -Scope '/' -ScopeType 'tenantRoot' -DisplayName 'Tenant Root' -Collector 'StartupValidation'
 
         $script:HttpReady = $false
@@ -1067,6 +1102,33 @@ try {
         }
     }
 
+    if ($doAccessPackages -or $doAccessReviews) {
+        Invoke-Collector -Name 'GovernanceAuthentication' -Optional -ScriptBlock {
+            $scopes = @()
+            if ($doAccessPackages) { $scopes += 'EntitlementManagement.Read.All' }
+            if ($doAccessReviews) { $scopes += 'AccessReview.Read.All' }
+            Initialize-ScannerGraphAuthentication -Mode $GraphAuthMode -ClientId $GraphClientId -Scopes $scopes
+        }
+    }
+    Invoke-GovernanceScan -State $script:Governance -Request {
+        param($url)
+        Invoke-GraphReadRequest -Url $url -Collector $script:GovernanceCollector -UseGovernanceAuthentication
+    } -OnStart {
+        param($name)
+        $script:GovernanceCollector = $name
+        Start-ScannerPhase -Name $name
+        Write-ScannerEvent -Level 'Info' -Collector $name -EventName 'collector-start'
+    } -OnComplete {
+        param($record)
+        [void]$script:StatusRows.Add($record)
+        foreach ($issue in $record.issues) {
+            Add-ErrorRow -Collector $record.collector -Status $issue.status -ErrorCode $issue.errorCode -Message $issue.message
+        }
+        if ($record.status -ne 'Skipped') { Complete-ScannerPhase -Name $record.collector -Status $record.status -RowsAdded $record.rowsAdded -Message $record.message }
+        Write-ScannerEvent -Level 'Info' -Collector $record.collector -EventName 'collector-end' -Data @{status=$record.status;rowsAdded=$record.rowsAdded}
+        if ($FailFast -and $record.status -notin @('Succeeded','Skipped')) { throw "Governance collector $($record.collector) failed: $($record.message)" }
+    }
+
     if ($doGroupExpansion) {
         Invoke-Collector -Name 'GroupExpansion' -Optional -ScriptBlock {
             $groupAssignments = @($script:DirectRows | Where-Object { $_.principalType -eq 'Group' -and $_.principalId })
@@ -1143,7 +1205,8 @@ try {
     }
 
     Invoke-Collector -Name 'PrincipalResolution' -Optional -ScriptBlock {
-        $ids = @($script:AccessRows | ForEach-Object { $_.principalId; $_.effectivePrincipalId } | Where-Object { $_ } | Sort-Object -Unique)
+        $governanceIds = @($script:Governance.Data.accessPackageAssignments | ForEach-Object { $_.principalId }) + @($script:Governance.Data.accessReviewDecisions | ForEach-Object { $_.principalId; $_.reviewedById })
+        $ids = @((@($script:AccessRows | ForEach-Object { $_.principalId; $_.effectivePrincipalId }) + $governanceIds) | Where-Object { $_ } | Sort-Object -Unique)
         $batches = [math]::Ceiling($ids.Count / 100)
         $batchIndex = 0
         for ($offset = 0; $offset -lt $ids.Count; $offset += 100) {
@@ -1371,6 +1434,8 @@ try {
     }
 
     Invoke-Collector -Name 'WorkbookReport' -Optional -ScriptBlock {
+        Complete-GovernanceAnalysis -State $script:Governance -AccessRows @($script:EffectiveRows)
+        $governanceFiles = @(Export-GovernanceOutputs -State $script:Governance -OutputDirectory $context.OutDir -EmitJson:$EmitJson)
         $columns = Get-AccessColumns
         $allAccessCsv = Join-Path $context.OutDir 'allAzureAccess.csv'
         $allAccessJson = Join-Path $context.OutDir 'allAzureAccess.json'
@@ -1424,6 +1489,7 @@ try {
                 --principal-resolution-csv $principalCsv `
                 --errors-csv $errorsCsv `
                 --coverage-json $coverageJson `
+                --governance-dir $context.OutDir `
                 --output $workbook `
                 --summary-json $summaryJson
             if ($LASTEXITCODE -ne 0) { throw "report.mjs exited with code $LASTEXITCODE" }
@@ -1452,13 +1518,15 @@ try {
                 scopeInventoryCsv = $scopeCsv
                 collectorStatusCsv = $statusCsv
                 coverageSummaryJson = $coverageJson
+                governanceCsv = @($governanceFiles | Where-Object { $_ -like '*.csv' })
+                governanceJson = @($governanceFiles | Where-Object { $_ -like '*.json' })
                 workbook = if (Test-Path -LiteralPath $workbook) { $workbook } else { '' }
                 reportSummaryJson = if (Test-Path -LiteralPath $summaryJson) { $summaryJson } else { '' }
             }
             stats = $coverage
         } -Depth 12
 
-        Compress-ResultFiles -DestinationPath (Join-Path $context.OutDir 'results.zip') -LiteralPaths @($allAccessCsv,$allAccessJson,$effectiveCsv,$directCsv,$groupCsv,$nestedCsv,$ownerCsv,$principalCsv,$groupExpansionCsv,$roleCsv,$scopeCsv,$statusCsv,$errorsCsv,$coverageJson,$context.ResultsJson,$workbook,$summaryJson)
+        Compress-ResultFiles -DestinationPath (Join-Path $context.OutDir 'results.zip') -LiteralPaths (@($allAccessCsv,$allAccessJson,$effectiveCsv,$directCsv,$groupCsv,$nestedCsv,$ownerCsv,$principalCsv,$groupExpansionCsv,$roleCsv,$scopeCsv,$statusCsv,$errorsCsv,$coverageJson,$context.ResultsJson,$workbook,$summaryJson) + $governanceFiles)
     }
 
     $attention = @($script:StatusRows | Where-Object { $_.status -ne 'Succeeded' -and $_.status -ne 'Skipped' }).Count

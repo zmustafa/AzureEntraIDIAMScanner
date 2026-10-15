@@ -47,6 +47,10 @@ jobs:
         shell: pwsh
         run: ./Test-Package.ps1 -SkipNpmInstall
 
+      - name: Validate governance collectors on Windows PowerShell 5.1
+        shell: powershell
+        run: .\tests\Test-Governance.ps1
+
       - name: npm audit (high severity)
         run: npm audit --audit-level=high
         continue-on-error: true

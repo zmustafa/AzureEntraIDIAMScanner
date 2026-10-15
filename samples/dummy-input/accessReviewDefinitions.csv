@@ -1,0 +1,6 @@
+"tenantId","id","displayName","reviewType","status","scopeJson","instanceEnumerationScopeJson","settingsJson","reviewersJson","fallbackReviewersJson","stageSettingsJson","createdDateTime","lastModifiedDateTime"
+"tenant-0000","review-definition-package","Package access certification","AccessPackage","Completed","{""accessPackageId"":""package-0001""}","","{""autoApplyDecisionsEnabled"":false}","[{""id"":""user-0001""}]","[]","[{""stageId"":""review-stage-0001""},{""stageId"":""review-stage-0002""}]","2026-01-01T00:00:00Z",""
+"tenant-0000","review-definition-group","Platform Operators membership","Group","InProgress","{""query"":""/groups/group-0001/transitiveMembers"",""queryType"":""MicrosoftGraph""}","","{}","[]","[]","","",""
+"tenant-0000","review-definition-app","Example application access","Application","InProgress","{""query"":""/servicePrincipals/spn-0001/appRoleAssignedTo""}","","{}","","","","",""
+"tenant-0000","review-definition-role","Directory role certification","DirectoryRole","Applied","{""query"":""/roleManagement/directory/roleAssignmentScheduleInstances""}","","{}","","","","",""
+"tenant-0000","review-definition-unknown","Unrecognized synthetic scope","Unknown","FutureStatus","{""query"":""/syntheticFutureScope""}","{}","","","","","",""

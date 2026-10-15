@@ -1,0 +1,3 @@
+"tenantId","id","catalogId","displayName","description","isHidden","createdDateTime","modifiedDateTime"
+"tenant-0000","package-0001","catalog-0001","Example platform onboarding","Synthetic group membership package","False","2026-01-01T00:00:00Z",""
+"tenant-0000","package-0002","catalog-0001","Example external collaboration","Synthetic external assignments only","False","",""

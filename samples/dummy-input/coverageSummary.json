@@ -18,5 +18,46 @@
     "skipReservations": false,
     "fullRoleDefinitionScan": true,
     "note": "Synthetic sample only. No real tenant data."
+  },
+  "governance": {
+    "enabledPackages": true,
+    "enabledReviews": true,
+    "lookbackDays": 0,
+    "cutoffUtc": null,
+    "generatedUtc": "2026-01-10T00:00:12Z",
+    "tenantId": "tenant-0000",
+    "totals": {
+      "accessCatalogs": 1,
+      "accessPackages": 2,
+      "accessPackagePolicies": 3,
+      "accessPackageResources": 1,
+      "accessPackageAssignments": 4,
+      "accessReviewDefinitions": 5,
+      "accessReviewInstances": 6,
+      "accessReviewStages": 2,
+      "accessReviewDecisions": 8,
+      "governanceAccessLinks": 1,
+      "governanceFindings": 3
+    },
+    "statuses": [
+      {
+        "collector": "AccessPackages",
+        "status": "Succeeded",
+        "rowsAdded": 2,
+        "message": "Synthetic package collection"
+      },
+      {
+        "collector": "AccessReviewDecisions",
+        "status": "PartiallyCollected",
+        "rowsAdded": 8,
+        "message": "Synthetic example: one review scope could not be read."
+      },
+      {
+        "collector": "AccessReviewStageReviewers",
+        "status": "Unauthorized",
+        "rowsAdded": 0,
+        "message": "Synthetic optional reviewer endpoint denied; no real API was called."
+      }
+    ]
   }
 }

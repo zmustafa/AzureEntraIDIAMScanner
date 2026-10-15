@@ -5,6 +5,10 @@ $script:ApiLogger = $null
 $script:HttpClient = $null
 $script:TokenCache = @{}
 $script:HttpDisabled = $false
+$script:GraphTenantId = ''
+$script:GraphSubscriptionId = ''
+$script:GraphAuthMode = 'AzureCli'
+$script:GraphAuthReady = $true
 $script:AzureScannerOutputRoot = $(if ($env:AZURE_IAM_SCANNER_OUTPUT_ROOT) { $env:AZURE_IAM_SCANNER_OUTPUT_ROOT } else { Join-Path ([System.IO.Path]::GetTempPath()) 'azure-scanners' })
 
 function Get-UtcTimestamp {
@@ -60,7 +64,7 @@ function Write-JsonFile {
     )
     $parent = Split-Path -Parent $Path
     if ($parent) { Ensure-Directory -Path $parent | Out-Null }
-    [System.IO.File]::WriteAllText($Path, ($Data | ConvertTo-Json -Depth $Depth), [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $Data -Depth $Depth), [System.Text.UTF8Encoding]::new($false))
 }
 
 function Write-RunManifest {
@@ -132,6 +136,10 @@ function Invoke-AzText {
     )
     $command = Resolve-AzCommand
     $effectiveArgs = @($Arguments)
+    $urlIndex = [Array]::IndexOf($effectiveArgs, '--url')
+    if ($script:GraphSubscriptionId -and $effectiveArgs -contains 'rest' -and $urlIndex -ge 0 -and $urlIndex + 1 -lt $effectiveArgs.Count -and $effectiveArgs[$urlIndex + 1] -like 'https://graph.microsoft.com/*' -and -not ($effectiveArgs -contains '--subscription')) {
+        $effectiveArgs += @('--subscription', $script:GraphSubscriptionId)
+    }
     if (-not ($effectiveArgs -contains '--only-show-errors')) {
         $effectiveArgs += '--only-show-errors'
     }
@@ -489,12 +497,16 @@ function Get-ScannerHttpClient {
 function Get-AzResourceToken {
     param([Parameter(Mandatory = $true)][string]$Resource)
     if ($script:HttpDisabled) { return $null }
+    $tenant = if ($Resource.TrimEnd('/') -eq 'https://graph.microsoft.com') { $script:GraphTenantId } else { '' }
+    $cacheKey = $Resource + '|' + $tenant
     $now = [DateTime]::UtcNow
-    if ($script:TokenCache.ContainsKey($Resource)) {
-        $entry = $script:TokenCache[$Resource]
+    if ($script:TokenCache.ContainsKey($cacheKey)) {
+        $entry = $script:TokenCache[$cacheKey]
         if ($entry.ExpiresUtc -gt $now.AddMinutes(5)) { return $entry.Token }
     }
-    $result = Invoke-AzText -Arguments @('account', 'get-access-token', '--resource', $Resource, '-o', 'json') -AllowError
+    $arguments = @('account', 'get-access-token', '--resource', $Resource, '-o', 'json')
+    if ($tenant) { $arguments += @('--tenant', $tenant) }
+    $result = Invoke-AzText -Arguments $arguments -AllowError
     if ($result.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($result.StdOut)) { return $null }
     $parsed = $null
     try { $parsed = ConvertFrom-JsonSafe -Json $result.StdOut } catch { return $null }
@@ -513,7 +525,7 @@ function Get-AzResourceToken {
             try { $expires = ([datetime]::Parse([string]$onProp.Value)).ToUniversalTime() } catch { }
         }
     }
-    $script:TokenCache[$Resource] = [pscustomobject]@{ Token = [string]$tokenProp.Value; ExpiresUtc = $expires }
+    $script:TokenCache[$cacheKey] = [pscustomobject]@{ Token = [string]$tokenProp.Value; ExpiresUtc = $expires }
     return [string]$tokenProp.Value
 }
 
@@ -606,42 +618,130 @@ function Disable-ScannerHttp {
     $script:HttpDisabled = $true
 }
 
+function Set-ScannerGraphTenant {
+    param([Parameter(Mandatory = $true)][string]$TenantId, [string]$SubscriptionId = '')
+    $script:GraphTenantId = $TenantId
+    $script:GraphSubscriptionId = $SubscriptionId
+}
+
+function Initialize-ScannerGraphAuthentication {
+    param(
+        [ValidateSet('AzureCli','GraphPowerShell')][string]$Mode = 'AzureCli',
+        [string]$ClientId = '',
+        [string[]]$Scopes = @('EntitlementManagement.Read.All','AccessReview.Read.All')
+    )
+    $script:GraphAuthMode = $Mode
+    $script:GraphAuthReady = $false
+    if ($Mode -eq 'GraphPowerShell') {
+        if (-not (Get-Module -ListAvailable Microsoft.Graph.Authentication)) {
+            throw 'GraphPowerShell authentication requires Microsoft.Graph.Authentication. Install-Module Microsoft.Graph.Authentication -Scope CurrentUser.'
+        }
+        Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+        $context = Get-MgContext
+        if ($context -and [string]$context.TenantId -ne $script:GraphTenantId) {
+            throw 'The existing Microsoft Graph context targets a different tenant. Disconnect-MgGraph and connect to the scan tenant explicitly.'
+        }
+        $missing = @($Scopes | Where-Object { -not $context -or @($context.Scopes) -notcontains $_ })
+        # App-only contexts do not expose application roles in Scopes; reads validate authorization.
+        if (-not $context -or ($context.AuthType -ne 'AppOnly' -and $missing.Count)) {
+            $arguments = @{ TenantId = $script:GraphTenantId; Scopes = $Scopes; ContextScope = 'Process'; NoWelcome = $true; ErrorAction = 'Stop' }
+            if ($ClientId) { $arguments.ClientId = $ClientId }
+            Connect-MgGraph @arguments | Out-Null
+            $context = Get-MgContext
+        }
+        if (-not $context -or [string]$context.TenantId -ne $script:GraphTenantId) { throw 'Microsoft Graph authentication did not establish the scan tenant context.' }
+    }
+    $script:GraphAuthReady = $true
+}
+
+function Invoke-GraphReadRequest {
+    param([Parameter(Mandatory = $true)][string]$Url, [string]$Collector = '', [switch]$UseGovernanceAuthentication)
+    $uri = $null
+    if (-not [Uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or $uri.Host -ne 'graph.microsoft.com' -or $uri.Port -ne 443 -or $uri.UserInfo -or $uri.AbsolutePath -notlike '/v1.0/*') {
+        throw 'Graph read URL must target https://graph.microsoft.com/v1.0/.'
+    }
+    if ($UseGovernanceAuthentication -and -not $script:GraphAuthReady) { throw 'Graph authentication is unavailable; see GovernanceAuthentication collector status.' }
+    if ($UseGovernanceAuthentication -and $script:GraphAuthMode -eq 'GraphPowerShell') {
+        $context = Get-MgContext
+        if (-not $context -or [string]$context.TenantId -ne $script:GraphTenantId) { throw 'Microsoft Graph context no longer matches the scan tenant.' }
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $status = 0
+        try {
+            $response = Invoke-MgGraphRequest -Method GET -Uri $Url -OutputType PSObject -ErrorAction Stop
+            $status = 200
+        }
+        catch {
+            $sourceError = $_
+            $responseProperty = $sourceError.Exception.PSObject.Properties['Response']
+            if ($responseProperty -and $responseProperty.Value) { $status = [int]$responseProperty.Value.StatusCode }
+            $code = 'GraphPowerShellError'
+            $detail = $sourceError.Exception.Message
+            if ($sourceError.ErrorDetails -and $sourceError.ErrorDetails.Message) {
+                try {
+                    $text = $sourceError.ErrorDetails.Message
+                    $jsonStart = [regex]::Match($text, '\{\s*"error"\s*:')
+                    if ($jsonStart.Success) { $text = $text.Substring($jsonStart.Index) }
+                    $parsedError = ConvertFrom-JsonSafe -Json $text
+                    if ($parsedError.PSObject.Properties['error']) {
+                        if ($parsedError.error.code) { $code = [string]$parsedError.error.code }
+                        if ($parsedError.error.message) { $detail = [string]$parsedError.error.message }
+                    }
+                }
+                catch { $code = 'GraphPowerShellUnparsedError' }
+            }
+            $failure = [InvalidOperationException]::new("Graph request failed (HTTP $status, $code): $detail", $sourceError.Exception)
+            $failure.Data['StatusCode'] = $status
+            $failure.Data['ErrorCode'] = $code
+            throw $failure
+        }
+        finally {
+            $watch.Stop()
+            Write-HttpTelemetry -Collector $Collector -Url $Url -Method 'GET' -DurationMs $watch.ElapsedMilliseconds -Status $status -Bytes 0 -Attempt 1 -Outcome $(if ($status -eq 200) { 'Succeeded' } else { 'Failed' })
+        }
+    }
+    else {
+        $response = $null
+        if (-not $script:HttpDisabled) {
+            $raw = Invoke-ScannerHttp -Method 'GET' -Url $Url -Resource 'https://graph.microsoft.com/' -Collector $Collector
+            if ($null -ne $raw) {
+                if ($raw.Status -ge 400) {
+                    $code = 'GraphHttpError'
+                    try {
+                        $body = ConvertFrom-JsonSafe -Json $raw.Body
+                        if ($body.PSObject.Properties['error'] -and $body.error.code) { $code = [string]$body.error.code }
+                    }
+                    catch { $code = 'InvalidGraphErrorResponse' }
+                    $errorObject = [InvalidOperationException]::new("Graph request failed (HTTP $($raw.Status), $code).")
+                    $errorObject.Data['StatusCode'] = $raw.Status
+                    $errorObject.Data['ErrorCode'] = $code
+                    throw $errorObject
+                }
+                $response = ConvertFrom-JsonSafe -Json $raw.Body
+            }
+        }
+        if ($null -eq $response) {
+            $arguments = @('rest', '--method', 'GET', '--url', $Url)
+            if ($script:GraphSubscriptionId) { $arguments += @('--subscription', $script:GraphSubscriptionId) }
+            $response = Invoke-AzJson -Arguments $arguments -Collector $Collector
+        }
+    }
+    if ($null -eq $response) { throw 'Graph returned no response; collection cannot be reported as empty success.' }
+    if ($response.PSObject.Properties['error']) { throw 'Graph returned an error response instead of data.' }
+    return $response
+}
+
 function Get-GraphPagedItems {
     param([Parameter(Mandatory = $true)][string]$Url, [string]$Collector = '')
     $items = [System.Collections.Generic.List[object]]::new()
     $nextUrl = $Url
-    $useHttp = -not $script:HttpDisabled
+    $visited = @{}
     while ($nextUrl) {
-        $resp = $null
-        if ($useHttp) {
-            $raw = Invoke-ScannerHttp -Method 'GET' -Url $nextUrl -Resource 'https://graph.microsoft.com/' -Collector $Collector
-            if ($null -eq $raw) { $useHttp = $false }
-            elseif ($raw.Status -ge 400) {
-                $detail = ''
-                try {
-                    $parsed = ConvertFrom-JsonSafe -Json $raw.Body
-                    if ($parsed -and $parsed.PSObject.Properties['error']) { $detail = [string]$parsed.error.message }
-                }
-                catch { $detail = '' }
-                throw ("Graph request failed (HTTP {0}): {1}" -f $raw.Status, $detail)
-            }
-            else { $resp = ConvertFrom-JsonSafe -Json $raw.Body }
-        }
-        if (-not $useHttp) {
-            $resp = Invoke-AzJson -Arguments @('rest', '--method', 'GET', '--url', $nextUrl) -AllowError
-        }
-        if (-not $resp) { break }
-        $errorProp = $resp.PSObject.Properties['error']
-        if ($errorProp -and $errorProp.Value) {
-            $err = $errorProp.Value
-            $codeProp = $err.PSObject.Properties['code']
-            $msgProp = $err.PSObject.Properties['message']
-            $code = if ($codeProp) { [string]$codeProp.Value } else { 'GraphError' }
-            $message = if ($msgProp) { [string]$msgProp.Value } else { 'Unknown Graph error.' }
-            throw "Graph request failed ($code): $message"
-        }
+        if ($visited.ContainsKey($nextUrl)) { throw 'Graph returned a repeated pagination link.' }
+        $visited[$nextUrl] = $true
+        $resp = Invoke-GraphReadRequest -Url $nextUrl -Collector $Collector
         $valueProp = $resp.PSObject.Properties['value']
-        if ($valueProp) { foreach ($item in @($valueProp.Value)) { [void]$items.Add($item) } }
+        if (-not $valueProp) { throw 'Graph collection response is missing value.' }
+        foreach ($item in @($valueProp.Value)) { if ($null -ne $item) { [void]$items.Add($item) } }
         $nextLinkProp = $resp.PSObject.Properties['@odata.nextLink']
         $nextUrl = if ($nextLinkProp) { [string]$nextLinkProp.Value } else { '' }
         if (-not $nextUrl) { break }

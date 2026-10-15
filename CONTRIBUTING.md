@@ -37,6 +37,8 @@ Before opening a pull request:
 - Do not commit secrets, tenant IDs, subscription IDs, user names, emails, or organization-specific data.
 - Use synthetic data under `samples/` for examples.
 - Keep new collectors best-effort and resilient; one collector failure should not stop the whole scan unless it is a startup failure.
+- Governance changes must pass `tests\Test-Governance.ps1` on PowerShell 5.1 and 7 and `node --test tests\report-governance.test.mjs`. These run without Azure access.
+- Live test fixture provisioning is separate from the read-only scanner. Use only an explicitly authorized tenant, record created objects, clean up those objects, and keep tenant-specific evidence outside the repository.
 - Document new flags, output columns, and workbook sheets in `README.md`.
 
 ## Code Style

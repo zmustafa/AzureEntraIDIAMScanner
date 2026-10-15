@@ -1,0 +1,2 @@
+"tenantId","assignmentId","packageId","principalId","resourceOriginId","accessAssignmentId","accessCollector","scope","roleName","accessPath","evidence"
+"tenant-0000","package-assignment-0001","package-0001","user-0002","group-0001","ra-0002","GroupExpansion","/subscriptions/sub-0001/resourceGroups/rg-app","Contributor","GroupTransitive","Synthetic matching group membership; linkage is evidence, not an additional access assignment."

@@ -1,7 +1,9 @@
 {
-  "generatedUtc": "2026-06-11T16:13:38.743Z",
+  "generatedUtc": "2026-10-15T20:36:02.970Z",
   "runDir": "./samples/dummy-input",
   "workbook": "./samples/all-azure-access-sample-ALL-dummy.xlsx",
+  "maxSheetRows": 250000,
+  "truncatedSheets": [],
   "allAccessRows": 13,
   "effectiveAccessRows": 13,
   "directAssignmentRows": 10,
@@ -32,6 +34,297 @@
       "skipReservations": false,
       "fullRoleDefinitionScan": true,
       "note": "Synthetic sample only. No real tenant data."
+    },
+    "governance": {
+      "enabledPackages": true,
+      "enabledReviews": true,
+      "lookbackDays": 0,
+      "cutoffUtc": null,
+      "generatedUtc": "2026-01-10T00:00:12Z",
+      "tenantId": "tenant-0000",
+      "totals": {
+        "accessCatalogs": 1,
+        "accessPackages": 2,
+        "accessPackagePolicies": 3,
+        "accessPackageResources": 1,
+        "accessPackageAssignments": 4,
+        "accessReviewDefinitions": 5,
+        "accessReviewInstances": 6,
+        "accessReviewStages": 2,
+        "accessReviewDecisions": 8,
+        "governanceAccessLinks": 1,
+        "governanceFindings": 3
+      },
+      "statuses": [
+        {
+          "collector": "AccessPackages",
+          "status": "Succeeded",
+          "rowsAdded": 2,
+          "message": "Synthetic package collection"
+        },
+        {
+          "collector": "AccessReviewDecisions",
+          "status": "PartiallyCollected",
+          "rowsAdded": 8,
+          "message": "Synthetic example: one review scope could not be read."
+        },
+        {
+          "collector": "AccessReviewStageReviewers",
+          "status": "Unauthorized",
+          "rowsAdded": 0,
+          "message": "Synthetic optional reviewer endpoint denied; no real API was called."
+        }
+      ]
+    }
+  },
+  "governance": {
+    "enabledPackages": true,
+    "enabledReviews": true,
+    "lookbackDays": 0,
+    "cutoffUtc": null,
+    "generatedUtc": "2026-01-10T00:00:12Z",
+    "tenantId": "tenant-0000",
+    "asOfUtc": "2026-01-10T00:00:12Z",
+    "sourceCounts": {
+      "accessCatalogs": 1,
+      "accessPackages": 2,
+      "accessPackagePolicies": 3,
+      "accessPackageResources": 1,
+      "accessPackageAssignments": 4,
+      "accessReviewDefinitions": 5,
+      "accessReviewInstances": 6,
+      "accessReviewStages": 2,
+      "accessReviewDecisions": 8,
+      "governanceAccessLinks": 1,
+      "governanceFindings": 3
+    },
+    "loadedCounts": {
+      "accessCatalogs": 1,
+      "accessPackages": 2,
+      "accessPackagePolicies": 3,
+      "accessPackageResources": 1,
+      "accessPackageAssignments": 4,
+      "accessReviewDefinitions": 5,
+      "accessReviewInstances": 6,
+      "accessReviewStages": 2,
+      "accessReviewDecisions": 8,
+      "governanceAccessLinks": 1,
+      "governanceFindings": 3
+    },
+    "truncatedDatasets": [],
+    "statuses": [
+      {
+        "collector": "AccessPackages",
+        "status": "Succeeded",
+        "rowsAdded": 2,
+        "message": "Synthetic package collection"
+      },
+      {
+        "collector": "AccessReviewDecisions",
+        "status": "PartiallyCollected",
+        "rowsAdded": 8,
+        "message": "Synthetic example: one review scope could not be read."
+      },
+      {
+        "collector": "AccessReviewStageReviewers",
+        "status": "Unauthorized",
+        "rowsAdded": 0,
+        "message": "Synthetic optional reviewer endpoint denied; no real API was called."
+      }
+    ],
+    "partial": true,
+    "partialReasons": [
+      "Collector AccessReviewDecisions: PartiallyCollected",
+      "Collector AccessReviewStageReviewers: Unauthorized"
+    ],
+    "metrics": {
+      "partial": true,
+      "configuredPoliciesWithoutReviews": 1,
+      "policiesWithUnknownReviewSetting": 1,
+      "activeReviews": 1,
+      "overdueReviews": 1,
+      "reviewsWithUnknownStatus": 1,
+      "finalDecisions": 6,
+      "stageDecisions": 2,
+      "decisionsWithUnknownLevel": 0,
+      "notReviewed": 1,
+      "deniedUnapplied": 1,
+      "deniedApplicationFailed": 1,
+      "deniedAppliedSuccessfully": 1,
+      "deniedApplicationUnsupported": 0,
+      "deniedApplicationUnknown": 0
+    },
+    "groupings": {
+      "partial": true,
+      "assignmentsByLifecycle": [
+        {
+          "count": 2,
+          "state": "delivered",
+          "status": "Delivered"
+        },
+        {
+          "count": 1,
+          "state": "expired",
+          "status": "Expired"
+        },
+        {
+          "count": 1,
+          "state": "partiallyDelivered",
+          "status": "DeliveryFailed"
+        }
+      ],
+      "definitionsByTypeAndStatus": [
+        {
+          "count": 1,
+          "reviewType": "AccessPackage",
+          "status": "Completed"
+        },
+        {
+          "count": 1,
+          "reviewType": "Application",
+          "status": "InProgress"
+        },
+        {
+          "count": 1,
+          "reviewType": "DirectoryRole",
+          "status": "Applied"
+        },
+        {
+          "count": 1,
+          "reviewType": "Group",
+          "status": "InProgress"
+        },
+        {
+          "count": 1,
+          "reviewType": "Unknown",
+          "status": "FutureStatus"
+        }
+      ],
+      "instancesByTypeAndStatus": [
+        {
+          "count": 1,
+          "reviewType": "AccessPackage",
+          "status": "Completed"
+        },
+        {
+          "count": 1,
+          "reviewType": "Application",
+          "status": "InProgress"
+        },
+        {
+          "count": 1,
+          "reviewType": "DirectoryRole",
+          "status": "Applied"
+        },
+        {
+          "count": 1,
+          "reviewType": "Group",
+          "status": "InProgress"
+        },
+        {
+          "count": 1,
+          "reviewType": "Group",
+          "status": "NotStarted"
+        },
+        {
+          "count": 1,
+          "reviewType": "Unknown",
+          "status": "FutureStatus"
+        }
+      ],
+      "finalDecisionsByTypeAndDecision": [
+        {
+          "count": 2,
+          "reviewType": "Group",
+          "decision": "Deny"
+        },
+        {
+          "count": 1,
+          "reviewType": "AccessPackage",
+          "decision": "Deny"
+        },
+        {
+          "count": 1,
+          "reviewType": "Application",
+          "decision": "NotReviewed"
+        },
+        {
+          "count": 1,
+          "reviewType": "DirectoryRole",
+          "decision": "Approve"
+        },
+        {
+          "count": 1,
+          "reviewType": "Unknown",
+          "decision": "FutureDecision"
+        }
+      ],
+      "finalDecisionsByApplicationResult": [
+        {
+          "count": 1,
+          "decision": "Approve",
+          "applyResult": "AppliedSuccessfully"
+        },
+        {
+          "count": 1,
+          "decision": "Deny",
+          "applyResult": "AppliedSuccessfully"
+        },
+        {
+          "count": 1,
+          "decision": "Deny",
+          "applyResult": "AppliedWithUnknownFailure"
+        },
+        {
+          "count": 1,
+          "decision": "Deny",
+          "applyResult": "New"
+        },
+        {
+          "count": 1,
+          "decision": "FutureDecision",
+          "applyResult": "FutureApplicationResult"
+        },
+        {
+          "count": 1,
+          "decision": "NotReviewed",
+          "applyResult": "New"
+        }
+      ],
+      "decisionsByLevel": [
+        {
+          "count": 6,
+          "decisionLevel": "Instance"
+        },
+        {
+          "count": 2,
+          "decisionLevel": "Stage"
+        }
+      ],
+      "stageDecisionsByDecision": [
+        {
+          "count": 1,
+          "decision": "Approve"
+        },
+        {
+          "count": 1,
+          "decision": "Deny"
+        }
+      ],
+      "findingsByType": [
+        {
+          "count": 1,
+          "type": "ConfiguredPolicyWithoutReviews"
+        },
+        {
+          "count": 1,
+          "type": "DeniedDecisionNotApplied"
+        },
+        {
+          "count": 1,
+          "type": "PartiallyDeliveredAssignment"
+        }
+      ]
     }
   }
 }
